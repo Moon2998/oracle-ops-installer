@@ -31,8 +31,8 @@ INSTALLER_VERSION="0.1.0"
 
 # ---- Pinned Oracle OPS release. Changed only by a reviewed installer release (docs/DEVELOPER.md). ----------------------
 OPS_REPO_URL="https://github.com/Moon2998/oracle-ops.git"
-OPS_COMMIT="5a13cf4456c4ed3361c74aaa39e5d36b257af894"   # full commit id; nothing else is ever checked out
-OPS_VERSION="0.1.5"                                      # service/VERSION at OPS_COMMIT
+OPS_COMMIT="63fb7c162c6b7076129b8a1f02b7bdb9b2dd44f5"   # full commit id; nothing else is ever checked out
+OPS_VERSION="0.1.9"                                      # service/VERSION at OPS_COMMIT
 SUPPORTED_PLATFORMS="ol:7"                               # /etc/os-release ID:major; must be in the release's jdk.platforms
 SUPPORTED_ARCH="x86_64"
 # git's credential prompts for OPS_REPO_URL, answered by the temporary askpass helper (and nothing else is answered).
