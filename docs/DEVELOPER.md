@@ -3,21 +3,55 @@
 ## Repository layout
 
 ```
-oracle-ops-installer.sh   the installer (single file; bash 4.2+; no dependencies beyond base OS tools)
+oracle-ops-installer.sh   entry: INSTALLER_VERSION, the pinned Oracle OPS release (OPS_COMMIT, OPS_VERSION), the Oracle OPS file
+                          manifest (OPS_FILE_MANIFEST, used by "validate"), the library manifest (LIB_MANIFEST), the library
+                          loader (ldr_*) and main()
+lib/env.sh                host locations and limits (plain globals), the seams (is_root, stdin_is_tty, host_arch, is_tmpfs,
+                          service_active, root_home, service_state, proc_owner_exe, run_as_repo_owner)
+lib/common.sh             output and logging, child processes, ending a run, prompts, validation helpers
+lib/state.sh              the protected log, lock and staging directory (the menu start-up)
+lib/prereq.sh             prerequisites
+lib/installation.sh       the existing installation and its verification
+lib/source.sh             token, access check, download, verification
+lib/ops-install.sh, ops-upgrade.sh, ops-deinstall.sh, ops-credentials.sh   the four actions
+lib/check-startup.sh      the strict command-line start-up and exit of status/validate; prune_check_logs for the menu start-up
+lib/ops-status.sh         the status items, the item runner, op_status (menu 5)
+lib/ops-validate.sh       the pinned-source checks, validate_run, op_validate (menu 6)
+lib/menu.sh               usage, parse_args, parse_check_args, menu
 README.md                 operator documentation
 SECURITY.md               protections and known limitations
 docs/DEVELOPER.md         this file
-tests/run-tests.sh        runs everything: bash -n, ShellCheck (if installed), the hermetic suite
-tests/installer-test.sh   the test cases
+tests/run-tests.sh        runs everything: bash -n, ShellCheck (if installed), the manifest check, the hermetic suite, the
+                          comparison with the single-file baseline, the mutation tests
+tests/installer-test.sh   the install/upgrade/de-install/credential tests and the integrity (loader) tests
+tests/check-tests.sh      the status/validate tests, the security-boundary tests, the static guard tests (sourced by the above)
 tests/lib.sh              sandbox, fixture repository, test doubles, assertions
+tests/update-lib-digests.sh   regenerates (or --check) the library manifest in the entry script
+tests/compare-command-sequences.sh   proves the split behaves like the single-file installer 96c8b73 (tests/baseline/)
+tests/mutation-tests.sh, tests/mutations.py   injects harmful changes into copies; each must be detected
+tests/guard-scan.py       the static guard: command-position scanner and its rules
 tests/online-check.sh     optional: real git + github.com with a deliberately invalid token
 ```
 
-The installer is one file on purpose: operators download one file and check one checksum. It can be sourced. Every
-action runs from `main()`, functions marked *seam* (`is_root`, `stdin_is_tty`, `host_arch`, `is_tmpfs`,
-`service_active`, `root_home`) wrap host-specific checks, and the "Host locations" globals are plain variables
-that tests reassign after sourcing. They are deliberately not read from the environment, so nobody can redirect a root
-run through an environment variable.
+The installer is an entry script and libraries, **verified by the entry script** (SHA-256 per library, ownership of the
+whole path when run as root; `SECURITY.md`, "Installer integrity"). It can be sourced: every action runs from `main()`.
+Functions marked *seam* (`lib/env.sh`) wrap host-specific actions so tests can replace them, and the "Host locations"
+globals are plain variables that tests reassign after sourcing. They are deliberately not read from the environment, so
+nobody can redirect a root run through an environment variable. Libraries contain only function definitions and constant
+assignments: nothing runs at load time (a test checks this statically).
+
+### Changing a library: regenerate the digests
+
+Every change to a `lib/*.sh` file must be followed by
+
+```bash
+tests/update-lib-digests.sh            # rewrites the LIB_MANIFEST block of oracle-ops-installer.sh
+tests/update-lib-digests.sh --check    # what tests/run-tests.sh does: fails while the block is stale or a lib file is not listed
+```
+
+A new library is added by putting a line with a digest of 64 zeros and the library path (`lib/<name>.sh`) into the
+block, in loading order, and running the script. An edited library with a stale digest is refused by the loader (exit 2)
+before anything runs. `--root DIR` works on a copy (the mutation tests use it).
 
 ## Running the tests
 
@@ -31,18 +65,74 @@ The tests need bash 4.2+, git, python3 (only to write the small test jar files),
 need **no root, no network and no access to the private Oracle OPS repository**. Everything happens in a temporary
 directory, which is removed when all tests pass and kept (its path is printed) when one fails.
 
+Further scripts, all run by `tests/run-tests.sh`:
+
+```bash
+bash tests/update-lib-digests.sh --check            # is the library manifest current?
+bash tests/compare-command-sequences.sh             # 58 baseline tests, baseline vs this code: must be 58/58 equal
+bash tests/mutation-tests.sh                        # 21 injected mutations + one without digest regeneration
+python3 -I tests/guard-scan.py check .              # the static guard; "selftest" checks the scanner itself
+```
+
+To run a group of tests, pass names or prefixes that end in `_`: `bash tests/installer-test.sh test_status_ test_validate_`.
+
+### The comparison harness (single-file baseline vs this code)
+
+`tests/baseline/oracle-ops-installer-96c8b73.sh` is the single-file installer at commit 96c8b73 (SHA-256 pinned in the
+comparison script). For each of the 58 baseline tests, every `run_installer` call is run against the baseline (menu
+"Exit" is 5) and against this code (Exit is 7) in record mode, and these are compared after normalising sandbox paths,
+random names and time stamps: exit status, terminal output, the Oracle OPS script trace, the git, local-git, yum,
+systemctl and forbidden-tool traces, the sandbox tree and the installer log lines. **The only accepted differences**:
+the menu lines "5) Status" and "6) Validate" and the number of "Exit", the prompt range `[1-5]`/`[1-7]` and the choice list
+after an invalid answer, the version string, the `--help` text, and the log line `menu choice: N` of the Exit entry. A
+source-identity phase also requires that every other baseline function is byte-identical (`main`: three added lines;
+`parse_args`: a prelude; `menu`: items 5-7; `usage`: the text). `init_logging`, `init_state`, `prune_logs` and all four
+actions are unchanged. The list is in the script (`allowed_sed`, `CHANGED_FUNCTIONS`, `LOST_CODE_ALLOWED`); extend it only
+together with a reviewed change of those functions.
+
+### Tests of the read-only checks
+
+`tests/check-tests.sh` (hermetic, non-root; the fake service process, `systemctl show` output and repository owner are
+test doubles/seams): healthy status (13 OK, exit 0), pin differences (WARN only), not installed (6), `--home` mismatch,
+every kind of service/metadata/undeterminable deviation (FAIL), usage errors and non-root (2), no terminal needed; the
+strict start-up (refused links, foreign owners, group/other-writable directories; other modes warn; missing directories and
+lock created; leftovers reported, never removed; no pruning); the shared/exclusive lock; the **read trap** (FIFOs in place
+of the configuration and credential files under a watchdog, mode-000 files, unchanged access times, marker text never in
+the output or log); validate (the archive of the pinned commit only, a missing commit, repositories with attributes,
+filters, replace refs or grafts, an R1 digest mismatch, a version mismatch, symlink/hardlink/`..`/absolute/extra/missing
+archive entries, failing OPS checks, git only `rev-parse`/`archive` through the seam with the owner's privileges, the OPS
+scripts only `config-migrate.sh validate` and `service-identity.sh check` with the staging directory as working
+directory); the **security boundary** for the CLI and the menu (snapshots of `u01`, `etc`, `run`, the fixture repository
+with `.git` and the installer tree before and after, with `LOG_DIR`/`STATE_DIR` at 0750, more than `LOG_KEEP` old logs, a
+marked leftover and a marked token directory in place; no new file under `/tmp`); the static guard.
+
+### Mutation tests
+
+`tests/mutation-tests.sh` copies the installer tree, injects ONE change from `tests/mutations.py` (`systemctl restart`,
+`systemctl stop`, `touch` in the home, a same-mode `chmod` and a `cat` of a credential file, `rm` of a release, `ln -sfn`
+on `current`, `git clone`, `git ls-remote`, `sqlplus`, `java`, `kill`, `mktemp`, `flock -x`, `config-migrate.sh apply`,
+`service-identity.sh retire`, `prune_logs` in the CLI path, leftover removal, a staging directory not removed, reading the
+working tree instead of `git archive`, skipping the R1 digest check), regenerates the digests in the copy, runs the
+status/validate/boundary/guard tests against it and prints which tests failed; every mutation must fail at least one. One more
+mutation is made without regenerating the digests and must be refused by the loader. The unmutated copy is the control.
+
 ### Testing without the private repository
 
 - `tests/lib.sh` builds a **fixture repository** with two commits. The first, `service/VERSION` 0.1.5, is what the
   tests pin. The second, 0.1.6, sits on the default branch and must never be installed. It contains stand-ins for the
   Oracle OPS scripts the installer calls. They record their arguments, environment variable names, umask, `TMPDIR`,
   the checked-out commit, and whether any token material is reachable while they run. Then they simulate success or a
-  chosen failure.
+  chosen failure. `config-migrate.sh` and `service-identity.sh` also run standalone (without the shared stub library),
+  because `validate` runs them from a copy of exactly six files. The harness computes the fixture's
+  `OPS_FILE_MANIFEST` (SHA-256 of the six blobs at the pinned fixture commit); tests assign it like `OPS_COMMIT`.
 - A **git test double** passes local commands to the real git. For `ls-remote`/`clone` of the private repository URL,
   it authenticates through the installer's **real** askpass helper and token file. It can simulate a rejected token,
   denied access, a network failure, a partial clone or a tool that prints the token. Then it clones the fixture with
   the real git.
-- **systemctl** and **yum** test doubles record calls. yum can "install" a removed tool, fail, or do nothing.
+- **systemctl** and **yum** test doubles record calls (`$SB/systemctl-trace`). yum can "install" a removed tool, fail, or do
+  nothing. systemctl answers `is-active` and `show` (configurable through `$SB/systemctl-show`, `systemctl-show-fail`,
+  `mainpid`). Forbidden-tool sentinels (`sqlplus sql java curl wget nc ssh scp rsync journalctl logrotate`) record any call
+  in `$SB/forbidden-trace`; a sentinel `java` sits in the fake runtime directory.
 - Each test gets a sandbox with its own `/var/lib`, `/var/log`, `/run`, `/etc`, installation directory and a curated
   `PATH` (so a missing tool can be simulated). `run_installer` sources the installer, points every host location into
   the sandbox and runs `main` with scripted input.
@@ -133,13 +223,19 @@ The pin is `OPS_COMMIT`, `OPS_VERSION` and `SUPPORTED_PLATFORMS` near the top of
 3. Re-check the interface table above against that commit (script names, options, exit codes, files). Update the
    installer and its stand-ins in `tests/lib.sh` where they changed.
 4. Set `OPS_COMMIT`, `OPS_VERSION`, and `SUPPORTED_PLATFORMS` (from `jdk.platforms` in `deploy/java-runtime.properties`).
+   **Also update `OPS_FILE_MANIFEST`** (the trust anchor of `validate`, R1): for each of the six paths in it,
+   `git show <commit>:<path> | sha256sum`, in the same "digest, two spaces, path" format. If the release adds a file that
+   `config-migrate.sh validate` or `service-identity.sh check` sources or reads, add it to the manifest (these two scripts
+   source `ownership-lib.sh`; `service-identity.sh` also sources `provision-java.sh`, which reads
+   `../java-runtime.properties`), and check that the fixture in `tests/lib.sh` (`MANIFEST_PATHS`) has it too. A wrong digest
+   makes `validate` end with exit 4.
 5. Run `tests/run-tests.sh` and, ideally, ShellCheck and `tests/online-check.sh`. Then do a real installation on a
    non-production host.
 6. Release a new installer version (below).
 
 ## Releasing a new installer version
 
-1. Update `INSTALLER_VERSION` in `oracle-ops-installer.sh`.
+1. Update `INSTALLER_VERSION` in `oracle-ops-installer.sh`. (If a library changed, regenerate the digests first.)
 2. Run `tests/run-tests.sh` (and ShellCheck: `shellcheck -x -s bash oracle-ops-installer.sh tests/*.sh`).
 3. Commit, tag `v<version>`, and create a GitHub release.
 4. Publish `sha256sum oracle-ops-installer.sh` in the release notes, so operators can compare it with the file they
@@ -157,3 +253,32 @@ The pin is `OPS_COMMIT`, `OPS_VERSION` and `SUPPORTED_PLATFORMS` near the top of
 | D6 | The release is pinned to commit `5a13cf4456c4ed3361c74aaa39e5d36b257af894` (VERSION 0.1.5). Oracle OPS has no release tags. Moved since: `d080ad0` (0.1.8), then `63fb7c162c6b7076129b8a1f02b7bdb9b2dd44f5` (0.1.9, 2026-10-29; pushed to `main`, still no protected tag). | repository owner |
 | D7 | Verification checks the build's stamped commit, not just VERSION, because the reference host runs a 0.1.5 build from different code. | implementation |
 | D8 | De-install uses Oracle OPS's non-destructive `retire` (rename, no deletion). Upgrade requires typed confirmation. A failed post-upgrade health check is reported, never rolled back automatically (as in Oracle OPS). | implementation, following Oracle OPS |
+
+## T2 decisions (2026-11-03): split, status, validate
+
+| | Decision | Decided by |
+|---|---|---|
+| D1 | Split the installer into libraries; the entry script verifies every library's SHA-256 and, run as root, the ownership of the whole path; unsafe ownership or permissions are refused. | human |
+| D2 | `validate` takes the Oracle OPS files from `git archive` of the pinned commit in the local repository; never the working tree; no network. | human |
+| D3 | No database access in status or validate. | human |
+| D4 | The Oracle OPS side (OpsDbCheck package readiness) reads dictionary views only and never calls API procedures; it is not used by this installer. | human |
+| D5 | status and validate write only their own log and lock files (and validate's own staging directory). | human |
+| D6 | Root-only command-line subcommands `status` and `validate`, and menu 5 Status, 6 Validate, 7 Exit. | human |
+| R1 | The trust anchor for D2 is a root-held per-file SHA-256 manifest of the extracted Oracle OPS files, carried in the entry script next to the pin; every extracted file is checked before anything runs. | review F1 |
+| R2 | The menu path keeps today's start-up exactly (log pruning, `init_state` housekeeping, possible chmod of the installer's own directories) and adds only the pruning of check logs; menu 5 and 6 run the same status/validate after that. The command-line subcommands are the strict read-only path (own log name, shared lock, no pruning, no chmod, no leftover removal). | review F3 |
+| R3 | `validate` may run `config-migrate.sh validate`, whose Java tool opens the token files to check them (it prints no values). The installer's own code never opens a credential file. | review F6 |
+| R4 | Operator procedure: root extracts a tagged installer release (`git archive`) into a root-owned path (for example `/opt/oracle-ops-installer`, root-owned ancestors) and checks the published SHA-256 of the entry script. Documented in the README; nothing installs it. | review F7 |
+
+### Read-only scope and its documented side effects
+
+Inside the protected scopes (`/u01/...` installation, `/etc`, systemd, the service, the installed runtime, the Oracle OPS
+repository) nothing changes. Outside them, a command-line `status` writes its check log (and creates the log/state directories
+and the lock file when they are missing); `validate` additionally creates and removes one staging directory in the state
+directory and runs the two Oracle OPS scripts, whose side effects are the R3 token-file read and the JVM `hsperfdata` files
+in `/tmp`. The menu path adds today's housekeeping of the installer's own directories.
+
+### Exit codes of status and validate
+
+`0` no FAIL (warnings allowed) · `1` any FAIL, or the lock is held exclusively by an install/upgrade/de-install · `2` not root,
+usage error, unsafe installer path · `3` a start-up tool is missing · `4` (validate) the pinned source could not be
+verified, nothing of it was run · `6` not installed (no unit and no `--home`) · `129`/`130`/`143` interrupted.

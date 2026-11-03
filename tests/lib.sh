@@ -2,7 +2,19 @@
 # Test library for the Oracle OPS Installer: sandbox, fixture repository, test doubles, assertions.
 # Hermetic: no root, no network, no real Oracle OPS repository, nothing outside the sandbox is changed.
 
-INSTALLER="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/oracle-ops-installer.sh"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# INSTALLER_UNDER_TEST lets tests/compare-command-sequences.sh run the same tests against the vendored baseline installer.
+INSTALLER="${INSTALLER_UNDER_TEST:-$REPO_ROOT/oracle-ops-installer.sh}"
+# The menu number of "Exit": 7 in this release; tests/compare-command-sequences.sh sets 5 for the single-file baseline 96c8b73.
+MENU_EXIT="${MENU_EXIT:-7}"
+# Record mode (COMPARE_MODE=1, set only by tests/compare-command-sequences.sh): fail() records the assertion instead of
+# exiting, and every run_installer call dumps what it did into $COMPARE_OUT/<test>/run<N>/ (see compare_record below).
+COMPARE_MODE="${COMPARE_MODE:-0}"
+COMPARE_OUT="${COMPARE_OUT:-}"
+CURRENT_TEST=""
+COMPARE_RUN=0
+COMPARE_LOGNAMES=""
+COMPARE_LOGS_BEFORE=""
 REAL_GIT="$(command -v git)"
 TEST_ROOT=""
 FIXTURE=""
@@ -14,7 +26,7 @@ OPS_URL="https://github.com/Moon2998/oracle-ops.git"
 SB=""
 RC=""
 
-fail() { printf 'ASSERTION FAILED: %s\n' "$*"; [ -z "$SB" ] || { echo "--- installer output ---"; cat "$SB/out" 2>/dev/null; echo "--- log ---"; cat "$SB"/var/log/oracle-ops-installer/*.log 2>/dev/null | tail -n 60; }; exit 1; }
+fail() { if [ "$COMPARE_MODE" = 1 ]; then compare_note_failure "$*"; return 0; fi; printf 'ASSERTION FAILED: %s\n' "$*"; [ -z "$SB" ] || { echo "--- installer output ---"; cat "$SB/out" 2>/dev/null; echo "--- log ---"; cat "$SB"/var/log/oracle-ops-installer/*.log 2>/dev/null | tail -n 60; }; exit 1; }
 assert_rc() { [ "$RC" = "$1" ] || fail "exit status $RC, expected $1"; }
 assert_out() { grep -qF -- "$1" "$SB/out" || fail "output does not contain: $1"; }
 assert_not_out() { ! grep -qF -- "$1" "$SB/out" || fail "output contains: $1"; }
@@ -144,7 +156,14 @@ STUB
 
   cat > "$1/deploy/scripts/service-identity.sh" <<'STUB'
 #!/bin/bash
-. "$(dirname "$0")/_stub.sh"
+if [ -f "$(dirname "$0")/_stub.sh" ]; then
+  . "$(dirname "$0")/_stub.sh"
+else   # run by "validate" from a copy that holds only the six manifest files: record standalone
+  . "$HOME/stub.conf"
+  NAME="$(basename "$0")"
+  record() { printf '%s\n' "$*" >> "$HOME/trace"; }
+  record "$NAME args=$*"; record "$NAME cwd=$PWD"
+fi
 sub="$1"; shift; home=""; apply=0
 while [ $# -gt 0 ]; do case "$1" in --home) home="$2"; shift 2 ;; --apply) apply=1; shift ;; *) shift ;; esac; done
 case "$sub" in
@@ -168,9 +187,32 @@ mode=0400; [ "${CRED_MODE:-ok}" != badperm ] || mode=0644
 chmod "$mode" "$CRED_DIR/.staged"; mv -f -- "$CRED_DIR/.staged" "$CRED_DIR/apps.credentials"
 echo "Stored and verified."
 STUB
+  cat > "$1/deploy/scripts/config-migrate.sh" <<'STUB'
+#!/bin/bash
+# Stand-in for deploy/scripts/config-migrate.sh (fixture only): records what it is called with and where, then succeeds or fails.
+. "$HOME/stub.conf"
+NAME="$(basename "$0")"
+printf '%s\n' "$NAME args=$*" "$NAME cwd=$PWD" "$NAME umask=$(umask) home=$HOME" >> "$HOME/trace"
+echo "config-migrate (test double): $*"
+case "${CONFIG_MIGRATE_MODE:-ok}" in
+  fail) echo "config-migrate: ERROR: application.yaml is not valid (test double)" >&2; exit 21 ;;
+esac
+echo "configuration is valid"
+STUB
   printf '# placeholder (fixture)\n' > "$1/deploy/scripts/ownership-lib.sh"
   printf '# placeholder (fixture)\n' > "$1/deploy/scripts/provision-java.sh"
   chmod 0755 "$1"/deploy/scripts/*.sh
+}
+
+# The Oracle OPS file manifest (R1) of the fixture: SHA-256 of the six blobs at the pinned fixture commit, in the entry script's format.
+FIX_MANIFEST=()
+MANIFEST_PATHS="deploy/scripts/config-migrate.sh deploy/scripts/service-identity.sh deploy/scripts/ownership-lib.sh deploy/scripts/provision-java.sh deploy/java-runtime.properties service/VERSION"
+fixture_manifest() {   # fixture_manifest <repository> <commit>
+  local p
+  FIX_MANIFEST=()
+  for p in $MANIFEST_PATHS; do
+    FIX_MANIFEST+=("$("$REAL_GIT" --git-dir="$1/.git" show "$2:$p" | sha256sum | cut -d' ' -f1)  $p")
+  done
 }
 
 make_fixture() {
@@ -184,6 +226,7 @@ make_fixture() {
       GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid
     "$REAL_GIT" init -q . && "$REAL_GIT" add -A && "$REAL_GIT" commit -q -m "fixture release 0.1.5" ) || return 1
   FIX_COMMIT="$(cd "$d" && "$REAL_GIT" rev-parse HEAD)"
+  fixture_manifest "$d" "$FIX_COMMIT"
   printf '0.1.6\n' > "$d/service/VERSION"
   ( cd "$d" && export HOME="$TEST_ROOT/fixhome" GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid \
       GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid
@@ -214,7 +257,7 @@ new_sandbox() {
   chmod 0755 "$SB/run"
   printf 'NAME="Oracle Linux Server"\nVERSION="7.9"\nID="ol"\nVERSION_ID="7.9"\n' > "$SB/etc/os-release"
   link_tools "$SB/bin" bash sh cat ls ln mkdir rm rmdir mv cp install chmod chown chgrp stat readlink mktemp date sed awk \
-    grep find sort head tail tr cut tee env getent id uname df timeout flock setpriv sha256sum cmp tar gzip curl unzip \
+    grep find sort head tail tr cut tee env getent id uname df timeout flock setpriv sha256sum cmp tar gzip unzip \
     python3 sleep kill touch wc dirname basename stty xargs od true false comm diff printf
   # git test double: authentication goes through the installer's real askpass helper and token file.
   cat > "$SB/reserve/git" <<EOF
@@ -224,7 +267,10 @@ SB='$SB'; REAL='$REAL_GIT'; FIXTURE='$FIXTURE'; URL='$OPS_URL'
 args=("\$@"); i=0
 while [ "\${args[\$i]:-}" = "-c" ]; do i=\$((i + 2)); done
 sub="\${args[\$i]:-}"
-case "\$sub" in ls-remote|clone) ;; *) exec "\$REAL" "\$@" ;; esac
+case "\$sub" in
+  ls-remote|clone) ;;
+  *) { printf 'cwd=%s argv:' "\$PWD"; printf ' %s' "\$@"; printf '\n'; } >> "\$SB/git-local-trace"; exec "\$REAL" "\$@" ;;
+esac
 tok="\$(cat "\$SB/expected-token")"
 {
   printf 'argv:'; printf ' %s' "\$@"; printf '\n'
@@ -258,7 +304,22 @@ EOF
   printf '%s\n' "$TEST_TOKEN" > "$SB/expected-token"
   cat > "$SB/bin/systemctl" <<EOF
 #!/bin/bash
-case "\$1" in is-active) [ "\$(cat '$SB/systemctl-state' 2>/dev/null)" = active ] ;; *) exit 0 ;; esac
+echo "\$*" >> '$SB/systemctl-trace'
+quiet=0; for a in "\$@"; do [ "\$a" != --quiet ] || quiet=1; done
+case "\$1" in
+  is-active)
+    if [ "\$(cat '$SB/systemctl-state' 2>/dev/null)" = active ]; then [ "\$quiet" = 1 ] || echo active; exit 0; fi
+    [ "\$quiet" = 1 ] || echo inactive; exit 3 ;;
+  show)
+    [ ! -e '$SB/systemctl-show-fail' ] || exit 1
+    if [ -f '$SB/systemctl-show' ]; then cat '$SB/systemctl-show'; exit 0; fi
+    if [ "\$(cat '$SB/systemctl-state' 2>/dev/null)" = active ]; then
+      printf 'ActiveState=active\nSubState=running\nMainPID=%s\nActiveEnterTimestamp=Tue 2026-11-03 10:00:00 UTC\n' "\$(cat '$SB/mainpid' 2>/dev/null || echo 4242)"
+    else
+      printf 'ActiveState=inactive\nSubState=dead\nMainPID=0\nActiveEnterTimestamp=\n'
+    fi ;;
+  *) exit 0 ;;
+esac
 EOF
   cat > "$SB/bin/yum" <<EOF
 #!/bin/bash
@@ -270,6 +331,17 @@ esac
 for p in "\$@"; do [ ! -e '$SB/reserve/'"\$p" ] || cp -P '$SB/reserve/'"\$p" '$SB/bin/'"\$p"; done
 EOF
   chmod 0755 "$SB/bin/systemctl" "$SB/bin/yum"
+  # Forbidden-tool sentinels: the installer must never call these. Each call is recorded and fails. (curl too: the
+  # prerequisite check only tests that it exists, `command -v curl`, so a sentinel satisfies it exactly as the real tool did.)
+  local ft
+  for ft in sqlplus sql java curl wget nc ssh scp rsync journalctl logrotate; do
+    cat > "$SB/bin/$ft" <<EOF
+#!/bin/bash
+echo "$ft \$*" >> '$SB/forbidden-trace'
+exit 1
+EOF
+    chmod 0755 "$SB/bin/$ft"
+  done
   {
     printf 'AUTH_BASE=%q\nSTATE_DIR=%q\nUNIT_FILE=%q\nCRED_DIR=%q\n' "$SB/run" "$SB/var/lib/oracle-ops-installer" \
       "$SB/etc/systemd/system/oracle-ops.service" "$SB/etc/oracle-ops"
@@ -278,7 +350,9 @@ EOF
   : > "$SB/in"
   TEST_TMPFS=0
   EXTRA=""
-}
+  COMPARE_RUN=0
+  COMPARE_LOGNAMES=""
+  }
 
 stub_mode() { printf '%s=%s\n' "$1" "$2" >> "$SB/roothome/stub.conf"; }
 git_mode() { printf '%s=%s\n' "$1" "$2" >> "$SB/git.conf"; }
@@ -286,10 +360,12 @@ git_mode() { printf '%s=%s\n' "$1" "$2" >> "$SB/git.conf"; }
 # run_installer [arguments...]: sources the installer, points every host location into the sandbox, applies $EXTRA
 # (per-test overrides), and runs main with stdin from $SB/in.
 run_installer() {
+  [ "$COMPARE_MODE" != 1 ] || COMPARE_LOGS_BEFORE="$(ls "$SB/var/log/oracle-ops-installer" 2>/dev/null)"
   (
     cd "$SB" || exit 99
     # shellcheck source=../oracle-ops-installer.sh
-    . "$INSTALLER"
+    . "$INSTALLER" || exit $?
+    LOADER_TEST_UID="$(id -u)"   # the split installer's sourced-mode ownership check accepts the test account (unused by the baseline)
     STATE_DIR="$SB/var/lib/oracle-ops-installer"
     LOG_DIR="$SB/var/log/oracle-ops-installer"
     AUTH_BASE="$SB/run"
@@ -304,6 +380,8 @@ run_installer() {
     HOME_FORBIDDEN="/ /etc /proc /sys /dev /run /boot /bin /sbin /lib /lib64 /usr $SB/var/lib/oracle-ops-installer $SB/etc/oracle-ops"
     OPS_COMMIT="$FIX_COMMIT"
     OPS_VERSION="$FIX_VERSION"
+    OPS_FILE_MANIFEST=("${FIX_MANIFEST[@]}")
+    proc_owner_exe() { [ -f "$SB/proc-owner-exe" ] || return 1; cat "$SB/proc-owner-exe"; }   # seam: the fake service process of the tests
     is_root() { return 0; }
     stdin_is_tty() { return 0; }
     root_home() { printf '%s' "$SB/roothome"; }
@@ -312,6 +390,7 @@ run_installer() {
     main "$@"
   ) < "$SB/in" > "$SB/out" 2>&1
   RC=$?
+  [ "$COMPARE_MODE" != 1 ] || compare_record
 }
 
 # An existing installation of <version> built from <commit>, with its unit, configuration and database credential file.
@@ -333,3 +412,76 @@ PY
 }
 
 tree_digest() { (cd "$1" && find . -printf '%p %y %m %s\n' | sort | sha256sum); }
+
+# ---------------------------------------------------------------------------------------------------------------------------
+# Record mode (tests/compare-command-sequences.sh): what each run_installer call did, as plain files for later comparison.
+# Raw values only; the comparison script normalises sandbox paths, random names and time stamps.
+# ---------------------------------------------------------------------------------------------------------------------------
+
+compare_note_failure() {
+  mkdir -p "$COMPARE_OUT/$CURRENT_TEST"
+  printf 'ASSERTION FAILED: %s\n' "$*" >> "$COMPARE_OUT/$CURRENT_TEST/assertions"
+}
+
+# One line per sandbox path: relative path, type, mode, size, link target. Directory sizes and the sizes of the installer's
+# own logs (their content carries pids and times) are left out; a jar is represented by the content of its entries.
+compare_tree() {
+  local rel t m s l
+  ( cd "$SB" && find . -mindepth 1 -printf '%P\t%y\t%m\t%s\t%l\n' ) | LC_ALL=C sort | while IFS=$'\t' read -r rel t m s l; do
+    [ "$rel" != out ] || continue
+    case "$t:$rel" in
+      d:*) printf '%s d %s\n' "$rel" "$m" ;;
+      f:*.jar) printf '%s f %s jar-content:%s\n' "$rel" "$m" "$(unzip -p "$SB/$rel" 2>/dev/null | tr '\n' '|')" ;;
+      f:var/log/oracle-ops-installer/*) printf '%s f %s -\n' "$rel" "$m" ;;
+      *) printf '%s %s %s %s %s\n' "$rel" "$t" "$m" "$s" "$l" ;;
+    esac
+  done
+}
+
+compare_record() {
+  local d f n
+  COMPARE_RUN=$((COMPARE_RUN + 1))
+  d="$COMPARE_OUT/$CURRENT_TEST/run$COMPARE_RUN"
+  mkdir -p "$d"
+  printf '%s\n' "$RC" > "$d/rc"
+  cp "$SB/out" "$d/out"
+  for f in roothome/trace:roothome-trace git-trace:git-trace git-local-trace:git-local-trace yum-trace:yum-trace \
+           systemctl-trace:systemctl-trace forbidden-trace:forbidden-trace; do
+    if [ -e "$SB/${f%%:*}" ]; then cp "$SB/${f%%:*}" "$d/${f##*:}"; else echo "<absent>" > "$d/${f##*:}"; fi
+  done
+  # the log files this call created (all calls so far, in creation order), so their time-stamped names can be normalised
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    printf '%s\n' "$COMPARE_LOGS_BEFORE" | grep -qxF -- "$n" || COMPARE_LOGNAMES="$COMPARE_LOGNAMES$n"$'\n'
+  done < <(ls "$SB/var/log/oracle-ops-installer" 2>/dev/null)
+  {
+    printf 'SB=%s\nTEST_ROOT=%s\nFIX_COMMIT=%s\nFIX_LATER_COMMIT=%s\n' "$SB" "$TEST_ROOT" "$FIX_COMMIT" "$FIX_LATER_COMMIT"
+    printf '%s' "$COMPARE_LOGNAMES" | sed 's/^/LOG=/'
+  } > "$d/meta"
+  compare_tree > "$d/tree"
+  compare_log_delta > "$d/logs"
+}
+
+# What this call added to the installer's logs: the lines appended to each log since the previous call, a new or rewritten log
+# (two runs within one second share a name and the second truncates it) from its first line. Snapshots of the logs as the
+# previous call left them are kept next to the records, outside the sandbox.
+compare_log_delta() {
+  local f n snap="$COMPARE_OUT/$CURRENT_TEST/.logsnap" old
+  mkdir -p "$snap"
+  for f in "$SB"/var/log/oracle-ops-installer/oracle-ops-installer-*.log; do
+    [ -f "$f" ] || continue
+    n="$(basename "$f")"
+    if [ -f "$snap/$n" ]; then
+      old="$(wc -l < "$snap/$n")"
+      if [ "$(wc -l < "$f")" -ge "$old" ] && head -n "$old" "$f" | cmp -s - "$snap/$n"; then
+        tail -n "+$((old + 1))" "$f"
+      else
+        cat "$f"
+      fi
+    else
+      cat "$f"
+    fi
+  done
+  rm -f "$snap"/*
+  cp -p "$SB"/var/log/oracle-ops-installer/oracle-ops-installer-*.log "$snap/" 2>/dev/null || true
+}

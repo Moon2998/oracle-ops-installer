@@ -31,9 +31,9 @@ test_requires_terminal() {
 }
 
 test_exit_option_changes_nothing() {
-  input 5
+  input "$MENU_EXIT"
   run_installer
-  assert_rc 0; assert_out "1) Install Oracle OPS"; assert_out "5) Exit"
+  assert_rc 0; assert_out "1) Install Oracle OPS"; assert_out "$MENU_EXIT) Exit"
   assert_clean; assert_no_trace; assert_absent "$SB/git-trace"
 }
 
@@ -79,9 +79,13 @@ test_install_runs_only_the_deploy_script_and_nothing_apex() {   # [24]
   scripts="$(sed -n 's/^\([^ ]*\) args=.*/\1/p' "$SB/roothome/trace" | sort -u | tr '\n' ' ')"
   [ "$scripts" = "deploy-oracle-ops.sh " ] || fail "unexpected Oracle OPS scripts were run: $scripts"
   # static: the installer never invokes anything APEX-related (APEX appears only in messages and comments)
-  if grep -n -i 'apex' "$INSTALLER" | grep -v -E '^[0-9]+:[[:space:]]*#' | grep -v -i -E 'say |Oracle APEX is not|APEX-related|apex is out of scope' ; then
-    fail "the installer has a non-message reference to APEX"
-  fi
+  local f
+  for f in "$INSTALLER" "$(dirname "$INSTALLER")"/lib/*.sh; do   # the entry script and every library
+    [ -f "$f" ] || continue
+    if grep -n -i 'apex' "$f" | grep -v -E '^[0-9]+:[[:space:]]*#' | grep -v -i -E 'say |Oracle APEX is not|APEX-related|apex is out of scope' ; then
+      fail "$f has a non-message reference to APEX"
+    fi
+  done
 }
 
 test_install_passes_java_archive() {
@@ -196,7 +200,7 @@ test_leftover_staging_directory_of_an_interrupted_run() {   # [11]
   mkdir -m 0700 "$SB/run/oracle-ops-installer.OLDAUTH1"
   echo "oracle-ops-installer-run 1" > "$SB/run/oracle-ops-installer.OLDAUTH1/.oracle-ops-installer-run"
   echo stale > "$SB/run/oracle-ops-installer.OLDAUTH1/token"
-  input 5
+  input "$MENU_EXIT"
   run_installer
   assert_rc 0; assert_clean
   assert_log "earlier, interrupted run"
@@ -206,7 +210,7 @@ test_unrelated_data_in_staging_directory_stops_the_run() {   # [11]
   mkdir -m 0700 -p "$SB/var/lib/oracle-ops-installer"
   echo keep > "$SB/var/lib/oracle-ops-installer/notes.txt"
   mkdir "$SB/var/lib/oracle-ops-installer/run.FOREIGN1"
-  input 5
+  input "$MENU_EXIT"
   run_installer
   assert_rc 1; assert_out "not created by this installer"
   [ "$(cat "$SB/var/lib/oracle-ops-installer/notes.txt")" = keep ] || fail "unrelated file was changed"
@@ -216,7 +220,7 @@ test_unrelated_data_in_staging_directory_stops_the_run() {   # [11]
 test_symlinked_or_foreign_owned_directories_are_refused() {   # [12]
   mkdir -p "$SB/elsewhere"
   ln -s "$SB/elsewhere" "$SB/var/lib/oracle-ops-installer"
-  input 5
+  input "$MENU_EXIT"
   run_installer
   assert_rc 1; assert_out "is a symbolic link"
   [ -z "$(ls -A "$SB/elsewhere")" ] || fail "something was written through the link"
@@ -545,7 +549,7 @@ test_concurrent_run_is_refused() {
   flock "$SB/var/lib/oracle-ops-installer/.lock" sleep 5 &
   local holder=$!
   sleep 0.5
-  input 5
+  input "$MENU_EXIT"
   run_installer
   kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
   assert_rc 1; assert_out "another run of the Oracle OPS Installer is in progress"
@@ -556,7 +560,7 @@ test_log_rotation_keeps_the_newest_and_nothing_else_is_removed() {
   mkdir -m 0700 -p "$d"
   for i in $(seq -w 1 25); do : > "$d/oracle-ops-installer-202601${i}T000000Z-1.log"; done
   echo keep > "$d/admin-notes.txt"
-  input 5
+  input "$MENU_EXIT"
   run_installer
   assert_rc 0
   [ "$(find "$d" -name 'oracle-ops-installer-*.log' | wc -l)" = 20 ] || fail "expected 20 logs to be kept"
@@ -564,15 +568,339 @@ test_log_rotation_keeps_the_newest_and_nothing_else_is_removed() {
   assert_absent "$d/oracle-ops-installer-20260101T000000Z-1.log"
 }
 
+# ---- integrity of the split installer (loader, library digests, ownership rules) ---------------------------------------------
+# These tests copy the installer tree into the sandbox, damage the copy in one way and expect the loader to refuse it; each has
+# a positive control (the undamaged copy, or the same copy with the damage undone, is accepted) so a refusal is known to come
+# from the rule under test. Nothing runs as root: the "executed as root" branch is exercised by calling the loader function
+# with a parameterised uid, and the ownership rules by calling the check function with an explicit extra owner.
+
+ENTRY_BASENAME="oracle-ops-installer.sh"
+
+make_copy() {   # make_copy <dir>: entry script and libraries, modes preserved
+  mkdir -p "$1/lib" && cp -p "$REPO_ROOT/$ENTRY_BASENAME" "$1/" && cp -p "$REPO_ROOT"/lib/*.sh "$1/lib/"
+}
+regen_digests() { bash "$REPO_ROOT/tests/update-lib-digests.sh" --root "$1" > /dev/null || fail "cannot regenerate the digests of $1"; }
+me() { id -u; }
+
+# probe_source <copy>: source the copy in a subshell; reports the load status and whether any library defined anything
+probe_source() {
+  ( . "$1/$ENTRY_BASENAME"; rc=$?; echo "load-status=$rc"; echo "state-dir=${STATE_DIR-unset}"; declare -F is_root > /dev/null && echo "seam=defined" || echo "seam=undefined" ) > "$SB/out" 2>&1
+  RC=$?
+}
+# probe_exec <copy> <args>: run the copy as a program (non-root)
+probe_exec() { local c="$1"; shift; bash "$c/$ENTRY_BASENAME" "$@" > "$SB/out" 2>&1; RC=$?; }
+# probe_check <copy> <extra owner uid or empty> [entry file]: the secure-path check on a copy
+probe_check() {
+  ( . "$REPO_ROOT/$ENTRY_BASENAME" && ldr_check_secure "$1" "${3:-$1/$ENTRY_BASENAME}" "$2" ) > "$SB/out" 2>&1
+  RC=$?
+}
+# probe_main <copy> <ADMIN_UID> <LOADER_TEST_UID>: source the copy, reassign the uids like the tests do, run main --version
+probe_main() {
+  ( . "$1/$ENTRY_BASENAME" || exit $?; ADMIN_UID="$2"; LOADER_TEST_UID="$3"; main --version ) > "$SB/out" 2>&1
+  RC=$?
+}
+# probe_run <copy> <executed 1|0> <euid> <admin uid> <test uid>: the loader function itself, as if run in that mode
+probe_run() {
+  ( . "$REPO_ROOT/$ENTRY_BASENAME"; LOADER_ADMIN_UID="$4"; LOADER_TEST_UID="$5"
+    ldr_run "$1/$ENTRY_BASENAME" "$2" "$3"; rc=$?; echo "ldr_run-status=$rc"; exit "$rc" ) > "$SB/out" 2>&1
+  RC=$?
+}
+
+test_integrity_real_tree_loads_and_manifest_is_current() {
+  probe_source "$REPO_ROOT"; assert_rc 0; assert_out "load-status=0"; assert_out "seam=defined"
+  probe_exec "$REPO_ROOT" --version; assert_rc 0; assert_out "Oracle OPS Installer 0"
+  bash "$REPO_ROOT/tests/update-lib-digests.sh" --check > "$SB/out" 2>&1; RC=$?
+  assert_rc 0; assert_out "library manifest is current"
+  # every library of the repository is listed, none twice, in the order the loader uses
+  local listed on_disk
+  listed="$(sed -n 's/^  "[0-9a-f]\{64\}  \(lib\/[a-z0-9-]*\.sh\)"$/\1/p' "$REPO_ROOT/$ENTRY_BASENAME" | sort | tr '\n' ' ')"
+  on_disk="$(cd "$REPO_ROOT" && ls lib/*.sh | sort | tr '\n' ' ')"
+  [ "$listed" = "$on_disk" ] || fail "listed libraries ($listed) differ from lib/*.sh ($on_disk)"
+}
+
+test_integrity_digest_mismatch_refuses_and_nothing_is_sourced() {
+  make_copy "$SB/inst"
+  probe_source "$SB/inst"; assert_rc 0; assert_out "load-status=0"           # control: the copy is accepted
+  printf '\n# one more comment\n' >> "$SB/inst/lib/prereq.sh"
+  probe_source "$SB/inst"
+  assert_out "load-status=2"; assert_out "lib/prereq.sh does not match its recorded SHA-256 digest"
+  assert_out "state-dir=unset"; assert_out "seam=undefined"                  # not even the libraries before it were sourced
+  probe_exec "$SB/inst" --version
+  assert_rc 2; assert_out "lib/prereq.sh does not match"; assert_not_out "Oracle OPS Installer 0"
+  regen_digests "$SB/inst"                                                   # control: the new digest is accepted
+  probe_exec "$SB/inst" --version; assert_rc 0; assert_out "Oracle OPS Installer 0"
+}
+
+test_integrity_missing_library_refused() {
+  make_copy "$SB/inst"
+  rm -f "$SB/inst/lib/menu.sh"
+  probe_source "$SB/inst"; assert_out "load-status=2"; assert_out "lib/menu.sh is missing"; assert_out "state-dir=unset"
+  probe_exec "$SB/inst" --version; assert_rc 2; assert_out "lib/menu.sh is missing"
+  mkdir "$SB/inst/lib/menu.sh"                                               # a directory is not a regular file either
+  probe_exec "$SB/inst" --version; assert_rc 2; assert_out "lib/menu.sh is missing or not a regular file"
+}
+
+test_integrity_library_symlink_refused() {
+  make_copy "$SB/inst"
+  cp -p "$SB/inst/lib/menu.sh" "$SB/menu-real.sh"                            # same bytes, hence the right digest
+  rm -f "$SB/inst/lib/menu.sh"; ln -s "$SB/menu-real.sh" "$SB/inst/lib/menu.sh"
+  probe_source "$SB/inst"; assert_out "load-status=2"; assert_out "lib/menu.sh is a symbolic link"; assert_out "state-dir=unset"
+  probe_exec "$SB/inst" --version; assert_rc 2; assert_out "lib/menu.sh is a symbolic link"
+  rm -f "$SB/inst/lib/menu.sh"; cp -p "$SB/menu-real.sh" "$SB/inst/lib/menu.sh"   # control
+  probe_exec "$SB/inst" --version; assert_rc 0
+  # the ownership check refuses it too (a link is examined, not followed)
+  rm -f "$SB/inst/lib/menu.sh"; ln -s "$SB/menu-real.sh" "$SB/inst/lib/menu.sh"
+  probe_check "$SB/inst" "$(me)"; assert_rc 1; assert_out "lib/menu.sh is a symbolic link"
+}
+
+test_integrity_entry_symlink_refused() {
+  make_copy "$SB/inst"
+  probe_check "$SB/inst" "$(me)"; assert_rc 0                                # control
+  mkdir "$SB/linked"; ln -s "$SB/inst/$ENTRY_BASENAME" "$SB/linked/$ENTRY_BASENAME"; ln -s "$SB/inst/lib" "$SB/linked/lib"
+  probe_check "$SB/linked" "$(me)"; assert_rc 1; assert_out "$SB/linked/$ENTRY_BASENAME is a symbolic link"
+  # sourced: libraries load (they are found next to the link) but main() refuses before doing anything else
+  mkdir "$SB/linked2"; ln -s "$SB/inst/$ENTRY_BASENAME" "$SB/linked2/$ENTRY_BASENAME"; cp -pr "$SB/inst/lib" "$SB/linked2/lib"
+  probe_main "$SB/linked2" "$(me)" "$(me)"; assert_rc 2; assert_out "is a symbolic link"; assert_not_out "Oracle OPS Installer 0"
+  # executed as root (simulated): refused before any library is hashed or sourced
+  probe_run "$SB/linked2" 1 0 0 "$(me)"; assert_rc 2; assert_out "is a symbolic link"
+}
+
+test_integrity_writable_library_lib_directory_or_ancestor_refused() {
+  mkdir -p "$SB/a/b"; make_copy "$SB/a/b/inst"
+  probe_check "$SB/a/b/inst" "$(me)"; assert_rc 0                            # control
+  local what mode path
+  for mode in g+w o+w; do
+    chmod "$mode" "$SB/a/b/inst/lib/common.sh"
+    probe_check "$SB/a/b/inst" "$(me)"; assert_rc 1; assert_out "$SB/a/b/inst/lib/common.sh is writable by group or other users"
+    chmod go-w "$SB/a/b/inst/lib/common.sh"
+    chmod "$mode" "$SB/a/b/inst/lib"
+    probe_check "$SB/a/b/inst" "$(me)"; assert_rc 1; assert_out "$SB/a/b/inst/lib is writable by group or other users"
+    chmod go-w "$SB/a/b/inst/lib"
+    chmod "$mode" "$SB/a/b/inst/$ENTRY_BASENAME"
+    probe_check "$SB/a/b/inst" "$(me)"; assert_rc 1; assert_out "$SB/a/b/inst/$ENTRY_BASENAME is writable by group or other users"
+    chmod go-w "$SB/a/b/inst/$ENTRY_BASENAME"
+    chmod "$mode" "$SB/a/b/inst"
+    probe_check "$SB/a/b/inst" "$(me)"; assert_rc 1; assert_out "$SB/a/b/inst is writable by group or other users"
+    chmod go-w "$SB/a/b/inst"
+    chmod "$mode" "$SB/a"                                                    # an ancestor further up
+    probe_check "$SB/a/b/inst" "$(me)"; assert_rc 1; assert_out "$SB/a is writable by group or other users"
+    chmod go-w "$SB/a"
+  done
+  probe_check "$SB/a/b/inst" "$(me)"; assert_rc 0                            # control again: everything restored
+  # through the whole loader, as root (simulated) and sourced
+  chmod g+w "$SB/a/b/inst/lib/menu.sh"
+  probe_run "$SB/a/b/inst" 1 0 0 "$(me)"; assert_rc 2; assert_out "lib/menu.sh is writable by group or other users"
+  probe_main "$SB/a/b/inst" "$(me)" "$(me)"; assert_rc 2; assert_out "lib/menu.sh is writable"
+  chmod go-w "$SB/a/b/inst/lib/menu.sh"
+  probe_main "$SB/a/b/inst" "$(me)" "$(me)"; assert_rc 0; assert_out "Oracle OPS Installer 0"
+}
+
+# The sticky-directory exception needs a root-owned sticky ancestor, which any temporary directory is (TMPDIR, /var/tmp, /tmp).
+sticky_ancestor() {  # prints the nearest root-owned, other-writable, sticky ancestor of the sandbox
+  local p="$SB" st
+  while [ "$p" != "/" ]; do
+    p="$(dirname "$p")"
+    st="$(stat -c '%u %a' "$p")"
+    case "$st" in "0 1"*[2367]) printf '%s' "$p"; return 0 ;; esac
+  done
+  return 1
+}
+
+test_integrity_sticky_ancestor_rule() {
+  local sticky
+  sticky="$(sticky_ancestor)" || fail "no root-owned sticky ancestor above $SB (run the tests with TMPDIR=/var/tmp or /tmp)"
+  make_copy "$SB/inst"
+  # the sandbox is a child of a sticky directory that root owns; its own next component belongs to the test account
+  probe_check "$SB/inst" "$(me)"; assert_rc 0                                # sticky accepted: next component is owned by an accepted account
+  probe_check "$SB/inst" "99999"                                             # the next component below $sticky is foreign to {root, 99999}
+  assert_rc 1; assert_out "$sticky is a sticky directory writable by other users and its next path component"
+  assert_out "is not owned by an administrative account"
+  # a sticky directory that is NOT root-owned or whose rule does not apply stays subject to the ownership rule
+  mkdir -p "$SB/s/inst2"; chmod 1777 "$SB/s"; make_copy "$SB/s/inst2"
+  probe_check "$SB/s/inst2" "$(me)"; assert_rc 0                             # sticky, other-writable, next component accepted
+  probe_check "$SB/s/inst2" "99999"; assert_rc 1                             # the first non-accepted node refuses
+  chmod 0777 "$SB/s"                                                         # writable and NOT sticky
+  probe_check "$SB/s/inst2" "$(me)"; assert_rc 1; assert_out "$SB/s is writable by group or other users"
+}
+
+test_integrity_owner_must_be_the_administrative_account() {
+  make_copy "$SB/inst"
+  probe_check "$SB/inst" "$(me)"; assert_rc 0                                # control
+  # the loader's administrative uid is not this account: the root-owned "/" is the first node refused
+  ( . "$REPO_ROOT/$ENTRY_BASENAME"; LOADER_ADMIN_UID=99999; ldr_check_secure "$SB/inst" "$SB/inst/$ENTRY_BASENAME" "" ) > "$SB/out" 2>&1; RC=$?
+  assert_rc 1; assert_out "/ is not owned by an administrative account (owner uid 0)"
+  # a tree owned by this account is refused when only root is accepted (the executed-as-root rule)
+  probe_run "$SB/inst" 1 0 0 ""; assert_rc 2; assert_out "ldr_run-status=2"; assert_out "administrative account"
+  probe_run "$SB/inst" 1 0 0 "$(me)"; assert_rc 0; assert_out "ldr_run-status=0"
+  # sourced: main() checks against the reassigned ADMIN_UID and refuses before it creates anything
+  EXTRA=""
+  probe_main "$REPO_ROOT" 99999 ""; assert_rc 2; assert_out "administrative account"; assert_not_out "Oracle OPS Installer 0"
+  probe_main "$REPO_ROOT" "$(me)" ""; assert_rc 0; assert_out "Oracle OPS Installer 0"
+  probe_main "$REPO_ROOT" 99999 "$(me)"; assert_rc 0                          # the seam the harness uses (existing test with ADMIN_UID=99999)
+  assert_absent "$SB/var/log/oracle-ops-installer"; assert_absent "$SB/var/lib/oracle-ops-installer"
+}
+
+test_integrity_unlisted_file_is_never_sourced() {
+  make_copy "$SB/inst"
+  printf 'touch %q\nunlisted_defined() { :; }\n' "$SB/unlisted-marker" > "$SB/inst/lib/zz-extra.sh"
+  printf 'touch %q\n' "$SB/lowercase-marker" > "$SB/inst/lib/env.sh.orig"
+  probe_source "$SB/inst"; assert_out "load-status=0"; assert_absent "$SB/unlisted-marker"; assert_absent "$SB/lowercase-marker"
+  probe_exec "$SB/inst" --version; assert_rc 0; assert_absent "$SB/unlisted-marker"
+  ( . "$SB/inst/$ENTRY_BASENAME"; declare -F unlisted_defined > /dev/null && echo defined || echo undefined ) > "$SB/out" 2>&1
+  assert_out "undefined"
+  bash "$REPO_ROOT/tests/update-lib-digests.sh" --check --root "$SB/inst" > "$SB/out" 2>&1; RC=$?
+  assert_rc 1; assert_out "UNLISTED library file(s) (never sourced): lib/zz-extra.sh"        # the build tooling flags it
+}
+
+test_integrity_stale_digest_block_is_detected() {
+  make_copy "$SB/inst"
+  bash "$REPO_ROOT/tests/update-lib-digests.sh" --check --root "$SB/inst" > "$SB/out" 2>&1; RC=$?; assert_rc 0
+  printf '\n# edited\n' >> "$SB/inst/lib/state.sh"
+  bash "$REPO_ROOT/tests/update-lib-digests.sh" --check --root "$SB/inst" > "$SB/out" 2>&1; RC=$?
+  assert_rc 1; assert_out "STALE"
+  local before; before="$(sha256sum < "$SB/inst/$ENTRY_BASENAME")"
+  bash "$REPO_ROOT/tests/update-lib-digests.sh" --check --root "$SB/inst" > /dev/null 2>&1                    # --check changes nothing
+  [ "$(sha256sum < "$SB/inst/$ENTRY_BASENAME")" = "$before" ] || fail "--check modified the entry script"
+  bash "$REPO_ROOT/tests/update-lib-digests.sh" --root "$SB/inst" > "$SB/out" 2>&1; RC=$?
+  assert_rc 0; assert_out "library manifest updated"
+  bash "$REPO_ROOT/tests/update-lib-digests.sh" --check --root "$SB/inst" > "$SB/out" 2>&1; RC=$?; assert_rc 0
+  [ -x "$SB/inst/$ENTRY_BASENAME" ] || fail "regeneration changed the mode of the entry script"
+  bash -n "$SB/inst/$ENTRY_BASENAME" || fail "regeneration broke the entry script"
+}
+
+test_integrity_library_that_creates_a_file_at_load_time_is_refused_before_it_runs() {
+  make_copy "$SB/inst"
+  printf '\ntouch %q\n' "$SB/marker" >> "$SB/inst/lib/ops-credentials.sh"                  # the LAST library
+  probe_source "$SB/inst"; assert_out "load-status=2"; assert_out "state-dir=unset"; assert_absent "$SB/marker"
+  probe_exec "$SB/inst" --version; assert_rc 2; assert_absent "$SB/marker"
+  probe_run "$SB/inst" 1 0 0 "$(me)"; assert_rc 2; assert_absent "$SB/marker"
+  # the marker mechanism itself works: once the digest is regenerated the library is accepted and runs
+  regen_digests "$SB/inst"
+  probe_exec "$SB/inst" --version; assert_rc 0; assert_exists "$SB/marker"
+}
+
+test_integrity_empty_bash_source_is_refused() {
+  make_copy "$SB/inst"
+  printf 'touch %q\n' "$SB/marker" > "$SB/inst/lib/zz-extra.sh"
+  bash < "$SB/inst/$ENTRY_BASENAME" > "$SB/out" 2>&1; RC=$?                                  # script read from standard input
+  assert_rc 2; assert_out "the script name is empty"
+  bash -c "$(cat "$SB/inst/$ENTRY_BASENAME")" > "$SB/out" 2>&1; RC=$?                          # script passed as a string
+  assert_rc 2; assert_out "the script name is empty"
+  ( . "$REPO_ROOT/$ENTRY_BASENAME"; ldr_run "" 0 "$(me)" ) > "$SB/out" 2>&1; RC=$?
+  assert_rc 2; assert_out "the script name is empty"
+  assert_absent "$SB/marker"
+}
+
+test_integrity_root_and_non_root_branches_of_the_loader() {
+  make_copy "$SB/inst"
+  chmod g+w "$SB/inst/lib/menu.sh"            # an unsafe mode: only the ownership step of a root run notices
+  # executed as root (simulated: euid = the loader's administrative uid): the secure-path check runs first
+  probe_run "$SB/inst" 1 0 0 "$(me)"; assert_rc 2; assert_out "is writable by group or other users"
+  probe_run "$SB/inst" 1 0 0 ""; assert_rc 2; assert_out "administrative account"
+  # executed as another user: only the ownership step is skipped, the digests are still verified
+  probe_run "$SB/inst" 1 "$(me)" 0 ""; assert_rc 0; assert_out "ldr_run-status=0"
+  probe_exec "$SB/inst" --version; assert_rc 0
+  # sourced: no ownership check at load time (main() does that), even for uid 0 and with the unsafe mode in place
+  probe_run "$SB/inst" 0 "$(me)" 0 ""; assert_rc 0
+  probe_run "$SB/inst" 0 0 0 ""; assert_rc 0
+  # ... but the digests are verified in every mode
+  printf '\n# edited\n' >> "$SB/inst/lib/menu.sh"
+  probe_run "$SB/inst" 1 "$(me)" 0 ""; assert_rc 2; assert_out "does not match"
+  probe_run "$SB/inst" 0 "$(me)" 0 ""; assert_rc 2; assert_out "does not match"
+}
+
+test_integrity_the_loader_does_not_depend_on_path() {
+  make_copy "$SB/inst"
+  PATH=/nonexistent /bin/bash "$SB/inst/$ENTRY_BASENAME" --version > "$SB/out" 2>&1; RC=$?
+  assert_rc 0; assert_out "Oracle OPS Installer 0"
+  mkdir "$SB/evilbin"
+  for t in stat readlink sha256sum; do printf '#!/bin/bash\ntouch %q\nexec /usr/bin/%s "$@"\n' "$SB/path-hijack-$t" "$t" > "$SB/evilbin/$t"; chmod 0755 "$SB/evilbin/$t"; done
+  PATH="$SB/evilbin:$PATH" bash "$SB/inst/$ENTRY_BASENAME" --version > "$SB/out" 2>&1; RC=$?
+  assert_rc 0; assert_absent "$SB/path-hijack-stat"; assert_absent "$SB/path-hijack-readlink"; assert_absent "$SB/path-hijack-sha256sum"
+}
+
+test_integrity_seams_come_from_env_and_test_overrides_win() {
+  grep -q '^is_root() ' "$REPO_ROOT/lib/env.sh" || fail "seam is_root is not in lib/env.sh"
+  local s
+  for s in is_root stdin_is_tty host_arch is_tmpfs service_active root_home service_state proc_owner_exe run_as_repo_owner; do
+    grep -q "^$s() " "$REPO_ROOT/lib/env.sh" || fail "seam $s is not defined in lib/env.sh"
+    grep -l "^$s() " "$REPO_ROOT"/lib/*.sh "$REPO_ROOT/$ENTRY_BASENAME" | grep -qv 'lib/env.sh' && fail "seam $s is defined outside lib/env.sh"
+  done
+  # definitions made after sourcing win over the library's, and the library's code then uses the override
+  ( . "$REPO_ROOT/$ENTRY_BASENAME"
+    host_arch() { echo riscv; }
+    service_active() { return 0; }
+    [ "$(host_arch)" = riscv ] && service_active && echo "override-wins" ) > "$SB/out" 2>&1
+  assert_out "override-wins"
+  ( . "$REPO_ROOT/$ENTRY_BASENAME"
+    host_arch() { echo riscv; }
+    scan_prerequisites; echo "unfixable=${UNFIXABLE//$'\n'/ }" ) > "$SB/out" 2>&1
+  assert_out "processor architecture riscv is not supported"
+}
+
+# Top-level statements of a library: blank, comment, function definition, or plain assignments without any substitution.
+toplevel_violations() {   # toplevel_violations <file>: prints each offending line
+  awk '
+    BEGIN {
+      assign = "[A-Za-z_][A-Za-z0-9_]*=(\"[^\"]*\"|\x27[^\x27]*\x27|[^ ;\"\x27`$()|&<>]*)"
+      okline = "^" assign "(;[ ]*" assign ")*;?[ \t]*(#.*)?$"
+    }
+    infn { if ($0 == "}") infn = 0; next }
+    /^[ \t]*$/ { next }
+    /^[ \t]*#/ { next }
+    /^[A-Za-z_][A-Za-z0-9_]*\(\) \{/ { if ($0 !~ /\(\) \{ .*\}[ \t]*$/) infn = 1; next }
+    { code = $0; sub(/[ \t]+#.*$/, "", code) }
+    code ~ /\$\(|`|<\(|>\(/ { print FILENAME ":" NR ": substitution at top level: " $0; next }
+    $0 ~ okline { next }
+    { print FILENAME ":" NR ": " $0 }
+  ' "$1"
+}
+
+test_integrity_libraries_contain_no_top_level_commands() {
+  local f v
+  for f in "$REPO_ROOT"/lib/*.sh; do
+    v="$(toplevel_violations "$f")"
+    [ -z "$v" ] || fail "top-level code in a library: $v"
+  done
+  # the checker itself: each of these must be reported
+  printf 'touch /x\n' > "$SB/bad1.sh"
+  printf 'X=$(date)\n' > "$SB/bad2.sh"
+  printf 'X=`date`\n' > "$SB/bad3.sh"
+  printf 'A=1; touch /x\n' > "$SB/bad4.sh"
+  printf 'f() {\n  :\n}\nsource /x\n' > "$SB/bad5.sh"
+  printf 'X="a $(date) b"\n' > "$SB/bad6.sh"
+  printf 'f() { :; }\nreadonly X=1\n' > "$SB/bad7.sh"
+  printf 'if true; then X=1; fi\n' > "$SB/bad8.sh"
+  for f in 1 2 3 4 5 6 7 8; do
+    [ -n "$(toplevel_violations "$SB/bad$f.sh")" ] || fail "the static check did not report $SB/bad$f.sh: $(cat "$SB/bad$f.sh")"
+  done
+  printf '# c\nA=1; B="x y"   # note; with $(text)\nf() { :; }\ng() {\n  X=$(date)\n}\nC=\n' > "$SB/good.sh"
+  [ -z "$(toplevel_violations "$SB/good.sh")" ] || fail "the static check rejected a clean library: $(toplevel_violations "$SB/good.sh")"
+}
+
 # ---- runner ----------------------------------------------------------------------------------------------------------------
 
+. "$(dirname "${BASH_SOURCE[0]}")/check-tests.sh"   # status, validate, the strict start-up, the security boundary, the static guard
+
+# wanted <test name> <selectors...>: no selector selects everything; a selector is a test name, or a prefix ending in "_"
+wanted() {
+  local t="$1" s
+  shift
+  [ $# -gt 0 ] || return 0
+  for s in "$@"; do
+    if [ "$s" = "$t" ]; then return 0; fi
+    case "$s" in *_) case "$t" in "$s"*) return 0 ;; esac ;; esac
+  done
+  return 1
+}
+
 main_tests() {
-  local t rc passed=0 failed=0 names="" only="${1:-}"
+  local t rc passed=0 failed=0 names=""
   TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/oracle-ops-installer-tests.XXXXXX")"
   make_fixture || { echo "cannot create the fixture repository"; exit 1; }
   for t in $(declare -F | awk '{ print $3 }' | grep '^test_'); do
-    [ -z "$only" ] || [ "$t" = "$only" ] || continue
-    ( new_sandbox; "$t" ) > "$TEST_ROOT/$t.out" 2>&1
+    wanted "$t" "$@" || continue
+    ( CURRENT_TEST="$t"; new_sandbox; "$t" ) > "$TEST_ROOT/$t.out" 2>&1
     rc=$?
     if [ "$rc" = 0 ]; then passed=$((passed + 1)); printf 'PASS %s\n' "$t"
     else failed=$((failed + 1)); names="$names $t"; printf 'FAIL %s\n' "$t"; sed 's/^/    /' "$TEST_ROOT/$t.out" | tail -n 80; fi
