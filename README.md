@@ -1,59 +1,139 @@
 # Oracle OPS Installer
 
-One interactive command that installs, upgrades or de-installs **Oracle OPS** on an Oracle Linux 7 server, and updates
-the WebLogic credential Oracle OPS stores. You do not need to know Git, clone anything or run the Oracle OPS deployment
-scripts yourself.
+One interactive command that installs, upgrades, reconfigures and de-installs **Oracle OPS** on an Oracle Linux 7 server,
+creates its two REST API keys, and shows its APIs, API keys and configuration. Clone this repository and run the script
+as root. You do not need to know Git or run the Oracle OPS deployment scripts yourself.
 
 This repository contains **only the installer**. Oracle OPS itself lives in a private repository
 (`Moon2998/oracle-ops`). The installer downloads one pinned, verified Oracle OPS release for the duration of a run, uses
 Oracle OPS's own scripts to do the work, and then removes the download again.
 
 > **Oracle APEX is out of scope.** This installer never installs, configures or deploys Oracle APEX, APEX applications
-> or workspaces. Install and configure APEX separately, by hand.
+> or workspaces. It only shows what the APEX Web Credentials need (menu 7). Configure APEX separately, by hand.
 
 ## What it does
 
 ```
-Oracle OPS Installer
-====================
-Oracle OPS release 0.1.5. Oracle APEX is not installed or configured by this installer.
+Oracle OPS Installer 0.3.0
+========================
+Oracle OPS release 0.1.9 (commit 63fb7c1). Oracle APEX is not installed or configured by this installer.
+Installed: none found on this host
 
-  1) Install Oracle OPS
-  2) Update credentials
-  3) Upgrade Oracle OPS
-  4) De-install Oracle OPS
-  5) Status
-  6) Validate
-  7) Exit
+   1) Fresh Installation
+   2) Upgrade Existing Installation    (not available: nothing installed)
+   3) Reconfigure Installation         (not available: nothing installed)
+   4) Validate Environment
+   5) View Installation Status
+   6) View APIs
+   7) View API Keys                    (not available: no keys in /etc/oracle-ops)
+   8) View Configuration               (not available: nothing installed)
+   9) Uninstall Oracle OPS             (not available: nothing installed)
+  10) Exit
 ```
 
-| Action | What happens | Oracle OPS script used (from the pinned release) |
+An item that does not apply to the host stays visible with the reason. Choosing it anyway changes nothing (exit 6).
+
+| # | Action | What happens | Oracle OPS script used (from the pinned release) |
+|---|---|---|---|
+| 1 | Fresh Installation | Read-only discovery, questions (installation directory, service account, database, REST API bind address/APEX address/port), review and `yes`. Then: the DBA SQL for the schema, download, private JDK, **the Oracle OPS tables and packages created as OPS_OWNER**, **both REST API keys**, the Oracle OPS setup assistant (OPS_RUNTIME password tested and stored), the network listener, a final validation, and **the keys shown** for APEX. See "Fresh Installation". | `provision-java.sh`, the release's `db/` and `docs/12-ddl/` scripts, `deploy-oracle-ops.sh`, `config-migrate.sh validate`, `service-identity.sh check` |
+| 2 | Upgrade Existing Installation | Installs the pinned release beside the current one and switches to it. The previous release stays installed. | `install-release.sh` (pre-check, then install), or `activate-release.sh` to finish an interrupted upgrade |
+| 3 | Reconfigure Installation | (1) WebLogic administration account: stored for Oracle OPS. (2) Database password: shows the manual procedure; changes nothing. (3) **Regenerate the REST API keys** (read, control or both), then an optional restart. | `manage-app-credentials.sh` for (1); none for (2) and (3) |
+| 4 | Validate Environment | Status, then the checks of the pinned release, run from a verified copy taken out of the local Oracle OPS repository (no network). Changes nothing. | `config-migrate.sh validate`, `service-identity.sh check` |
+| 5 | View Installation Status | Read-only report on the installed Oracle OPS (13 checks, below). Changes nothing. | none |
+| 6 | View APIs | The API catalogue of the pinned release: endpoint, method, purpose, access level, key, status (from what the running service reported), and details per API (headers, parameters, example body and response). Never shows a key. | none |
+| 7 | View API Keys | Shows the read key, the control key or both from `/etc/oracle-ops` with the APEX Web Credential settings, **after you type `SHOW`**, then clears the screen. Never logged. | none |
+| 8 | View Configuration | Shows `config/application.yaml` (values of secret-looking keys masked) and the owner/mode of the credential files (their contents are never shown). | none |
+| 9 | Uninstall Oracle OPS | Stops and disables the service, removes its systemd unit and log-rotation file, and **renames** the installation directory to `<dir>.retired-<time>`. Nothing is deleted; `/etc/oracle-ops` (including the API keys) stays. | `service-identity.sh retire --apply` |
+| 10 | Exit | Nothing is changed. | – |
+
+Each run does one action, then exits.
+
+### Fresh Installation
+
+Built for an **application server** (Oracle OPS) and a separate **database server** (the repository PDB, Oracle APEX),
+or both on one host.
+
+```
+[1/9] Checking the system (read-only)...      prerequisites, OS, CPU, memory, disk, systemd, existing installation
+[2/9] Installation settings (nothing is changed yet)...
+      Installation directory [/u01/oracle_ops_runtime]:
+      Service account user / group:           must exist, never root, never created
+      Database host / listener port [1521]:   the listener is probed from this host
+      Database service name:                  the PDB's service (not a SID)
+      REST API bind address [127.0.0.1]:      127.0.0.1 if APEX/ORDS is on this host, else this host's IP
+      IP address(es) of the APEX/ORDS server: only when the bind address is not loopback (at most 8)
+      REST API port (1024-65535):             must be free
+[3/9] Review...                               every setting and the planned changes; type yes
+[4/9] Database prerequisites (DBA)...         1 = write and show the DBA SQL, wait for the DBA; 2 = already done
+[5/9] Configuring source...                   GitHub access token (hidden), download of the pinned release, token removed
+[6/9] Creating the Oracle OPS database objects...
+                                              private JDK installed; OPS_OWNER password (hidden); read-only check;
+                                              type yes; the release's own scripts run as OPS_OWNER
+[7/9] Creating the REST API keys...           api.credentials (read, GET) and api-control.credentials (control, POST)
+[8/9] Installing Oracle OPS...                the Oracle OPS setup assistant: OPS_RUNTIME password (tested, then stored in
+                                              /etc/oracle-ops/database.credentials), node name, optional EBS; then the
+                                              REST API is moved to the bind address if it is not loopback
+[9/9] Final validation...                     [PASS]/[FAIL] per check, then both API keys are shown for APEX
+```
+
+**Database (fixed names):** tablespace `OPS_DATA`, users `OPS_OWNER` (owns the Oracle OPS objects) and `OPS_RUNTIME`
+(the service's login).
+
+- The **DBA SQL** (step 4, saved by default as `/root/oracle-ops-schema-<release>.sql` and shown on screen) creates the
+  tablespace if missing (a datafile path, or Oracle Managed Files), both users, `CREATE SESSION/TABLE/SEQUENCE/PROCEDURE`
+  for `OPS_OWNER`, `CREATE SESSION` for `OPS_RUNTIME`, and `SELECT` on the ten `DBA_*` views that the Oracle OPS scripts
+  check. SQL*Plus asks the DBA for both passwords (hidden); they are not in the file. Run it in the PDB, not in
+  `CDB$ROOT`: `sqlplus system@//<db-host>:<port>/<service> @oracle-ops-schema-<release>.sql`. It refuses to run twice.
+- The **tables and packages** (step 6) are created by the installer itself, logged in as `OPS_OWNER`: it runs the pinned
+  release's own scripts unchanged (V4_001, V4_002, the `EXECUTE` grant on `OPS_RUN_API` to `OPS_RUNTIME`, V5_001,
+  V8_001), each checked against the SHA-256 recorded in the installer. No Oracle client is needed on the application
+  server: the installer's own Java tool uses the release's private JDK and JDBC driver. A complete, valid schema is left
+  as it is; a partly built one stops the run (the installer never drops or replaces database objects).
+- The `OPS_OWNER` password is typed once, hidden, used for the check and the creation, then cleared. It is never stored,
+  never in a log, never in a command line or environment. A wrong password gets one more try only (a loop could lock
+  the account); a locked or expired account stops the run.
+
+**REST API:** GET and POST are part of the release; both keys are created automatically.
+
+- **APEX/ORDS on this host:** keep `127.0.0.1`. Every API is reachable.
+- **APEX/ORDS on the database server:** enter this host's IP and the APEX/ORDS server's IP. The installer sets
+  `api.bind-address` and `api.plain-http.client-addresses` (backup first, validated by Oracle OPS's `config-migrate.sh`,
+  restarted and checked; restored if Oracle OPS refuses it). Plain HTTP: keys and data cross the network unencrypted
+  until HTTPS is added. **With Oracle OPS 0.1.9 a caller on another host gets About and Status only**; Managed Servers,
+  host monitoring and node identity answer on the application server itself until a later Oracle OPS release opens them.
+- Start/stop (POST) stays off (`ebs.control.enabled: false`).
+
+**Keys at the end:** after every check passed, both keys are printed with their APEX Web Credential settings (`Valid for
+URLs` = the real listener), then the screen is cleared when you press Enter. Menu 7 shows them again later. They are in
+no log.
+
+- **Nothing changes before the `yes` on the review screen**, and nothing on the host changes while the installer waits for
+  the DBA.
+- **Final validation:** service active, pinned release and build commit, a healthy database connection, the API routes the
+  service reported (must include `/api/v1/ops/status`), the network listener (if set), both key files `root:<group>` 0640,
+  and Oracle OPS's `service-identity.sh check`.
+
+The installer prints only high-level messages and its questions. Git commands, download details and build output go to
+a protected log. **One exception:** the Oracle OPS setup assistant (Fresh Installation) and credential manager
+(Reconfigure) talk to you directly. Their questions and messages are shown between two dashed lines, and also recorded
+in the log.
+
+### View API Keys and APEX Web Credentials
+
+For each key the installer prints the settings documented by Oracle OPS (`docs/08` section 7.2, `docs/12`):
+
+| Setting | Read key (GET APIs) | Control key (POST APIs) |
 |---|---|---|
-| Install Oracle OPS | Fresh installation. The Oracle OPS setup assistant asks for the service account, database connection and options, proves the database login, writes the configuration and installs. | `deploy-oracle-ops.sh --home <dir>` |
-| Update credentials | (1) WebLogic administration account: stored for Oracle OPS. (2) Database password: shows the manual procedure; changes nothing. | `manage-app-credentials.sh` |
-| Upgrade Oracle OPS | Installs the pinned release beside the current one and switches to it. The previous release stays installed. | `install-release.sh` (pre-check, then install), or `activate-release.sh` to finish an interrupted upgrade |
-| De-install Oracle OPS | Stops and disables the service, removes its systemd unit and log-rotation file, and **renames** the installation directory to `<dir>.retired-<time>`. Nothing is deleted. | `service-identity.sh retire --apply` |
-| Status | Read-only report on the installed Oracle OPS (13 checks, below). Changes nothing. | none |
-| Validate | Status, then the checks of the pinned release, run from a verified copy taken out of the local Oracle OPS repository (no network). Changes nothing. | `config-migrate.sh validate`, `service-identity.sh check` |
-| Exit | Nothing is changed. | – |
+| Static ID | `OPS_API_TOKEN` | `oracle-ops-api-token-action` |
+| Authentication type | HTTP Header | HTTP Header |
+| Credential name | `Authorization` | `Authorization` |
+| Credential secret | `Bearer <read key>` | `Bearer <control key>` |
+| Valid for URLs | `http://<api.bind-address>:<api.port>/` (read from the installed `application.yaml`) | same |
 
-Each run does one action, then exits. Install, Update credentials, Upgrade and De-install go through the same stages
-(Status and Validate print a list of checks instead, see "Status and validate"):
-
-```
-[1/5] Checking system prerequisites...
-[2/5] Configuring Oracle OPS...            (or: Checking the current installation...)
-[3/5] Configuring source...
-[4/5] Installing Oracle OPS...             (or: Upgrading / De-installing / Updating ...)
-[5/5] Finalizing installation...
-
-Oracle OPS installation completed successfully.
-```
-
-The installer prints only these high-level messages and its questions. Git commands, download details and build
-output go to a protected log. **One exception:** the Oracle OPS setup assistant (Install) and credential manager
-(Update credentials) talk to you directly. Their questions and messages are shown between two dashed lines, and also
-recorded in the log.
+The key is printed only after you type `SHOW`; the screen (and, where the terminal supports it, its scroll-back) is
+cleared when you press Enter. The log records that a key was displayed, never the key. After **Reconfigure > Regenerate
+the REST API keys**, update the APEX Web Credential and restart Oracle OPS (the installer offers the restart); until both
+are done, APEX calls with the old key fail with HTTP 401.
 
 ## Supported systems
 
@@ -93,24 +173,26 @@ If you use an HTTP proxy, `sudo` drops proxy variables. Pass them explicitly:
 
 ## Download and run
 
-The installer is the entry script `oracle-ops-installer.sh` plus the libraries in `lib/`. Before it sources any library,
-the entry script checks the library's SHA-256 against a list that is part of the entry script, and (run as root) that the
-whole path to it is root-owned and not writable by group or other. **Install it as a unit, as root, into a root-owned
-path** (for example `/opt/oracle-ops-installer`, whose parent directories are root-owned too), and compare the checksum of
-the entry script with the one published in the release notes. This is the procedure (nothing in the installer does it
-for you):
+Clone this repository wherever you like and run the script as root:
 
 ```bash
-# on a host with a clone of the installer repository, as root, for a tagged release
-cd /path/to/oracle-ops-installer
-git archive --format=tar --prefix=oracle-ops-installer/ v<release-tag> | tar -x -C /opt --no-same-owner
-chown -R root:root /opt/oracle-ops-installer && chmod -R go-w /opt/oracle-ops-installer
-sha256sum /opt/oracle-ops-installer/oracle-ops-installer.sh    # compare with the checksum in the release notes
-bash /opt/oracle-ops-installer/oracle-ops-installer.sh
+git clone <installer repository URL> oracle-ops-installer
+cd oracle-ops-installer
+sudo bash ./oracle-ops-installer.sh
 ```
 
-Run as root from a directory that is not root-owned (for example a checkout under a user's home), the installer refuses
-with exit status 2 and says which path is unsafe. Run by a normal user it only answers `--help` and `--version`.
+Before it sources any library, the entry script checks every library's SHA-256 against a list inside the entry script.
+Run as root, it also checks that the whole path to it is root-owned and not writable by group or other.
+
+- **Root-owned path** (for example a copy in `/opt/oracle-ops-installer`): it starts directly.
+- **Any other path** (for example a clone in `/u01/master`, owned by `oracle`): it explains that the account owning the
+  files could have changed them, asks you to type `yes`, copies the entry script and the listed libraries into a new
+  root-only directory `/var/lib/oracle-ops-installer-copy.XXXXXXXX`, runs that copy (which checks every digest again),
+  and removes the copy at the end. Without a terminal (scripts, `status`/`validate` from cron) it refuses instead.
+
+The copy protects the run against changes made while it runs. It cannot prove that nobody changed the files before:
+compare `sha256sum oracle-ops-installer.sh` with the value published for the release. Run by a normal user the installer
+only answers `--help` and `--version`.
 
 Options: `--java-archive FILE` (air-gapped Java runtime, see above), `--help`, `--version`; and the read-only
 subcommands `status` and `validate` (below).
@@ -164,7 +246,7 @@ sudo bash oracle-ops-installer.sh validate [--home DIR] [--source-repo DIR]
 
 Both need root, need **no terminal** and ask nothing, so they can run from a script or a monitoring job. The subcommand
 must be the first argument; `--java-archive`, unknown and repeated options are usage errors (exit 2). The menu offers
-the same checks as **5 Status** and **6 Validate** (Validate asks for the repository path, default `/u01/oracle_ops`,
+the same checks as **5 View Installation Status** and **4 Validate Environment** (Validate asks for the repository path, default `/u01/oracle_ops`,
 three attempts).
 
 `--home` defaults to the installation directory the installed unit names; if both exist they must agree. With no unit
@@ -222,7 +304,7 @@ beside each other (they share the lock) but not during an install, upgrade or de
 | Path | What | Who manages it |
 |---|---|---|
 | `/u01/oracle_ops_runtime` (default; you can choose another) | the installed Oracle OPS: `releases/<version>/`, `current`, `config/`, `logs/`, `evidence/`, `runtime/java/` | Oracle OPS scripts |
-| `/etc/oracle-ops/` | Oracle OPS credential files (`database.credentials`, optional `api.credentials`, `apps.credentials`) | Oracle OPS scripts; the installer only checks them, never writes them |
+| `/etc/oracle-ops/` | Oracle OPS credential files (`database.credentials`, `api.credentials`, `api-control.credentials`, optional `apps.credentials`) | Oracle OPS scripts; the installer writes only the two API key files (Fresh Installation, Reconfigure) and creates the directory (root:`<group>` 0750) if it is missing |
 | `/etc/systemd/system/oracle-ops.service`, `/etc/logrotate.d/oracle-ops` | service unit and log rotation | Oracle OPS scripts |
 | `/var/lib/oracle-ops-installer/` | root-only staging area: a `run.XXXXXXXX` directory per run (the temporary download) and a lock file | installer; emptied at the end of every run |
 | `/run/oracle-ops-installer.XXXXXXXX/` (or `run.XXXXXXXX/auth/`) | root-only token file and git helper for the download | installer; removed right after the download |
@@ -255,10 +337,13 @@ When something fails, the installer prints a short reason and the log's path. Or
 | `the access token has no access to the Oracle OPS repository` | Give the token access to `oracle-ops` with Contents: Read-only. |
 | `GitHub could not be reached over HTTPS…` | Check DNS, firewall or proxy (see the proxy note above). |
 | `the pinned Oracle OPS release … is not available` | The pinned commit is not in the repository (for example, history was rewritten). A corrected installer release is needed. |
-| `Oracle OPS is already installed … Choose 'Upgrade Oracle OPS'` | Install never replaces an existing installation. Use Upgrade, or De-install first. |
+| `Oracle OPS is already installed … Choose 'Upgrade Existing Installation'` | Fresh Installation never replaces an existing installation. Use Upgrade, or Uninstall first. |
+| `… is not a valid key file` / `… is a symbolic link` (API key, at the review screen) | An existing `/etc/oracle-ops/api*.credentials` is not exactly one `api.token=` / `api.control.token=` line of at least 32 characters in a single regular file. Fix or remove it (it was not changed), then run again. |
+| `Port … is already in use` | Another program listens there. Choose another port. |
+| `[FAIL] REST API deployed` | The service did not log `API routes served: [...]` with `/api/v1/ops/status`. Check `<dir>/logs/oracle-ops.log` and `/etc/oracle-ops/api.credentials`. |
 | `release 0.1.9 is already installed … built from different source` | The host runs a build with the same version number but different code. Oracle OPS cannot install a second build under one version, so a new Oracle OPS version (and installer release) is needed. |
 | `an upgrade needs both in place` | Upgrade needs the existing `config/application.yaml` and `/etc/oracle-ops/database.credentials`. |
-| `the Oracle OPS setup assistant did not complete` | Read the assistant's messages (shown on screen and in the log), fix the cause and run Install again. An incomplete installation is detected and completed. |
+| `the Oracle OPS setup assistant did not complete` | Read the assistant's messages (shown on screen and in the log), fix the cause and run Fresh Installation again. An incomplete installation is detected and completed; the API key files already created are kept and reused. |
 | `did not report a healthy database connection` | The new release started but could not log in to the database. Check the database and `<dir>/logs/oracle-ops.log`. See "Rolling back". |
 | `another run of the Oracle OPS Installer is in progress` | Only one install, upgrade or de-install at a time. Wait for it to finish. (`status` and `validate` may run together, but not during one of those.) |
 | `lib/… does not match its recorded SHA-256 digest`, `… is missing`, `… is a symbolic link`, `… is writable by group or other users`, `… is not owned by an administrative account` (exit 2) | The installer's files are not the released ones, or the path to them is not root-owned. Install the tagged release again as described in "Download and run". |
@@ -273,7 +358,7 @@ Upgrade finishes an interrupted upgrade.
 
 Running again is safe:
 
-- **Install** when the pinned release is already installed and running reports that and changes nothing. It refuses
+- **Fresh Installation** when the pinned release is already installed and running reports that and changes nothing. It refuses
   any other existing installation. It offers to complete an installation directory left by an earlier, failed run.
 - **Upgrade** when already on the pinned release changes nothing. It finishes an upgrade whose release was deployed but
   never activated. It refuses an installation that has the same version number built from different code.
@@ -296,7 +381,7 @@ Ordinary deletion does not securely erase data on disk.
 ## What remains after a successful installation
 
 Oracle OPS in the installation directory, running as `oracle-ops.service` (enabled), its credential files in
-`/etc/oracle-ops/`, its unit and log-rotation file, and the installer's own logs in `/var/log/oracle-ops-installer/`. No
+`/etc/oracle-ops/` (including both REST API keys), its unit and log-rotation file, and the installer's own logs in `/var/log/oracle-ops-installer/`. No
 copy of the Oracle OPS source code remains on the host.
 
 ## Rolling back

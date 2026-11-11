@@ -2,8 +2,8 @@
 # Oracle OPS Installer library: usage, argument parsing, menu
 # Sourced only by the integrity loader in oracle-ops-installer.sh (digest-verified). Function definitions and constant
 # global assignments only: nothing here may run a command at load time. usage, parse_args and menu changed in 0.2.0
-# (read-only subcommands, menu items 5-7); tests/compare-command-sequences.sh proves that nothing else of the 0.1.0
-# behaviour moved.
+# (read-only subcommands, menu items 5-7). The menu changed again in 0.3.0: ten items, each shown with the reason when it
+# does not apply to this host (the action itself still refuses with exit 6; the menu text is only a hint).
 
 # ---------------------------------------------------------------------------------------------------------------------------
 # Entry
@@ -17,7 +17,9 @@ Usage: sudo bash $0 [--java-archive FILE]
        bash $0 --help | --version
 
 Interactive installer for Oracle OPS release $OPS_VERSION (Oracle Linux 7, x86_64). Choose one action from the menu:
-install, update credentials, upgrade, de-install, status, validate. Oracle APEX is not part of this installer.
+Fresh Installation, Upgrade, Reconfigure, Validate Environment, View Installation Status, View APIs, View API Keys,
+View Configuration, Uninstall. Fresh Installation creates both REST API keys (read and control) in /etc/oracle-ops.
+Oracle APEX is not part of this installer.
 
   --java-archive FILE   a pre-staged copy of the Oracle JDK archive pinned by Oracle OPS, for hosts that cannot
                         reach download.oracle.com (passed to the Oracle OPS scripts, which verify its checksum)
@@ -35,7 +37,7 @@ Read-only checks (root; no terminal and no prompt needed; nothing is installed, 
   --source-repo DIR     validate only: the local Oracle OPS repository (default: $DEFAULT_SOURCE_REPO)
 The subcommand must be the first argument. Exit status: 0 no problem found | 1 a check failed | 2 cannot run as invoked |
 4 the pinned source could not be verified (validate) | 6 Oracle OPS is not installed. The menu offers the same checks as
-items 5 and 6.
+items 5 (status) and 4 (validate).
 
 Logs: $LOG_DIR (root only). See README.md.
 EOF
@@ -100,31 +102,55 @@ parse_args() {
   fi
 }
 
+# menu_item <number> <text> [reason it does not apply]
+menu_item() {
+  if [ -n "${3:-}" ]; then printf '  %2s) %-32s (not available: %s)\n' "$1" "$2" "$3"
+  else printf '  %2s) %s\n' "$1" "$2"; fi
+}
+
 menu() {
-  local c
+  local c inst=0 keys=0 none="" item name
+  if [ -f "$UNIT_FILE" ] && [ ! -L "$UNIT_FILE" ]; then inst=1; describe_installation; fi
+  for item in $API_KEY_FILES; do
+    name="${item%%:*}"
+    if [ -f "$CRED_DIR/$name" ] && [ ! -L "$CRED_DIR/$name" ]; then keys=1; fi
+  done
+  [ "$inst" = 1 ] || none="nothing installed"
   echo
-  say "Oracle OPS Installer"
-  say "===================="
-  say "Oracle OPS release $OPS_VERSION. Oracle APEX is not installed or configured by this installer."
+  say "Oracle OPS Installer $INSTALLER_VERSION"
+  say "========================"
+  say "Oracle OPS release $OPS_VERSION (commit ${OPS_COMMIT:0:7}). Oracle APEX is not installed or configured by this installer."
+  if [ "$inst" = 1 ]; then
+    if [ "$INST_ACTIVE" = yes ]; then name="running"; else name="not running"; fi
+    say "Installed: Oracle OPS ${INST_RELEASE:-(release unknown)} at ${INST_HOME:-(unknown directory)}, service $name"
+  else
+    say "Installed: none found on this host"
+  fi
   echo
-  say "  1) Install Oracle OPS"
-  say "  2) Update credentials"
-  say "  3) Upgrade Oracle OPS"
-  say "  4) De-install Oracle OPS"
-  say "  5) Status"
-  say "  6) Validate"
-  say "  7) Exit"
+  if [ "$inst" = 1 ]; then menu_item 1 "Fresh Installation" "Oracle OPS is already installed"; else menu_item 1 "Fresh Installation"; fi
+  menu_item 2 "Upgrade Existing Installation" "$none"
+  menu_item 3 "Reconfigure Installation" "$none"
+  menu_item 4 "Validate Environment"
+  menu_item 5 "View Installation Status"
+  menu_item 6 "View APIs"
+  if [ "$keys" = 1 ]; then menu_item 7 "View API Keys"; else menu_item 7 "View API Keys" "no keys in $CRED_DIR"; fi
+  menu_item 8 "View Configuration" "$none"
+  menu_item 9 "Uninstall Oracle OPS" "$none"
+  menu_item 10 "Exit"
   echo
-  choose c "Choose an option [1-7]: " 1 2 3 4 5 6 7
+  choose c "Choose an option [1-10]: " 1 2 3 4 5 6 7 8 9 10
   log "menu choice: $c"
   echo
   case "$c" in
     1) op_install ;;
-    2) op_credentials ;;
-    3) op_upgrade ;;
-    4) op_deinstall ;;
+    2) op_upgrade ;;
+    3) op_reconfigure ;;
+    4) op_validate ;;
     5) op_status ;;
-    6) op_validate ;;
-    7) finish 0 ;;
+    6) op_view_apis ;;
+    7) op_view_api_keys ;;
+    8) op_view_config ;;
+    9) op_deinstall ;;
+    10) finish 0 ;;
   esac
 }

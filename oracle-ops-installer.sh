@@ -1,19 +1,26 @@
 #!/bin/bash
 # Oracle OPS Installer
 #
-# A menu-driven wrapper that installs, upgrades or de-installs Oracle OPS and updates its stored WebLogic credential.
-# It contains no Oracle OPS code and none of Oracle OPS's installation logic: for each action it downloads ONE pinned,
-# verified Oracle OPS release from the private repository into a root-only staging directory, runs the Oracle OPS
-# script made for that action, verifies the result, and removes the staged source and the access token again.
-# Oracle APEX is out of scope: this installer never installs, configures or deploys anything APEX-related.
+# An interactive, menu-driven installer for Oracle OPS. The operator clones this repository and runs it as root.
+# It contains no Oracle OPS code and none of Oracle OPS's installation logic: for each changing action it downloads ONE
+# pinned, verified Oracle OPS release from the private repository into a root-only staging directory, runs the Oracle OPS
+# script made for that action, verifies the result, and removes the staged source and the access token again. The one
+# thing it writes itself is the pair of REST API key files (lib/api-keys.sh). Oracle APEX is out of scope: this installer
+# never installs, configures or deploys anything APEX-related (it shows what the APEX Web Credentials need).
 #
-#   Action                 Oracle OPS script it runs (from the pinned release)
-#   Install Oracle OPS     deploy/scripts/deploy-oracle-ops.sh --home <dir>     (interactive setup assistant)
-#   Update credentials     deploy/scripts/manage-app-credentials.sh              (WebLogic credential; interactive)
-#   Upgrade Oracle OPS     deploy/scripts/install-release.sh --home --user --group service/   (or activate-release.sh)
-#   De-install Oracle OPS  deploy/scripts/service-identity.sh retire --home <dir> --apply      (renames, deletes nothing)
+#   Menu                              What runs
+#    1 Fresh Installation             read-only discovery, questions, review; then both API keys in /etc/oracle-ops and
+#                                     deploy/scripts/deploy-oracle-ops.sh --home --user --group --enable-api ...
+#    2 Upgrade Existing Installation  deploy/scripts/install-release.sh --home --user --group service/ (or activate-release.sh)
+#    3 Reconfigure Installation       deploy/scripts/manage-app-credentials.sh (WebLogic), DB password guidance, or new API keys
+#    4 Validate Environment           read-only (below)
+#    5 View Installation Status       read-only (below)
+#    6 View APIs                      read-only: the API catalogue of the pinned release + what the service reports it serves
+#    7 View API Keys                  shows a key from /etc/oracle-ops after a typed confirmation; never logged
+#    8 View Configuration             read-only: application.yaml (secret-looking values masked), credential file metadata
+#    9 Uninstall Oracle OPS           deploy/scripts/service-identity.sh retire --home <dir> --apply (renames, deletes nothing)
 #
-# Read-only checks (menu 5 Status, 6 Validate; or from the command line, root, no terminal, nothing is changed):
+# Read-only checks (menu 5 Status, 4 Validate; or from the command line, root, no terminal, nothing is changed):
 #   Status                 examines the installed Oracle OPS (unit, release, build commit, runtime, service, log, file metadata)
 #   Validate               status, then deploy/scripts/config-migrate.sh validate and service-identity.sh check, run from a
 #                          verified copy of exactly six files taken from the local Oracle OPS repository (git archive of the
@@ -38,7 +45,7 @@
 
 set +x +v   # never trace: a trace would print the access token the moment it is handled
 
-INSTALLER_VERSION="0.2.0"
+INSTALLER_VERSION="0.3.0"
 
 # ---- Pinned Oracle OPS release. Changed only by a reviewed installer release (docs/DEVELOPER.md). ----------------------
 OPS_REPO_URL="https://github.com/Moon2998/oracle-ops.git"
@@ -64,24 +71,44 @@ OPS_FILE_MANIFEST=(
   "e358d84552808a5c0bd6679d690c283b938ebe15c2bd843c898681d093213107  service/VERSION"
 )
 
+# ---- Oracle OPS database scripts: run in this order AS OPS_OWNER by Fresh Installation (lib/db-deploy.sh) ------------------
+# "<SHA-256 of the blob at OPS_COMMIT>  <run|include|grant>  <path in the release | package for an installer grant>".
+# run = executed; include = only reached through @@ from the script before it (copied beside it); grant = the one statement
+# the release has no script for: GRANT EXECUTE ON OPS_OWNER.<package> TO OPS_RUNTIME (V5_001 requires it). Changed together
+# with the pin; tests/db-check.py compares every digest with the pinned commit.
+OPS_DB_SCRIPTS=(
+  "dc3b0c2c6d396037421e57cf7d9b4f0acf11cc61cd5ef66d0f6751d7d55a76c5  run  db/migrations/V4_001__create_ops_run.sql"
+  "07d93decc0af51f9fbbb1c19aed87e42d521fa183ffbe5ac1846d67f88c5a5d6  run  db/migrations/V4_002__create_ops_run_api.sql"
+  "-  grant  ops_run_api"
+  "dd578b42cc4089474ccded2e17a3c9afde7bef15c580ab6b05f6edd225bdb52a  run  db/migrations/V5_001__add_ops_run_get_run.sql"
+  "668650d4e82a098c99e3261799dbace26afb5b7b44be1b50f335f2c3596ef218  run  docs/12-ddl/V8_001__create_ops_wls_action.sql"
+  "2f9c9d85ecc4e50b3f12bb00dbf1f3101824e759cdaa3af186b93f9508f6b6f1  include  docs/12-ddl/V8_001__ops_wls_action_api_body.sql"
+)
+
 # ---- Library manifest: SHA-256 of every library the loader will source, in loading order. -----------------------------
 # Regenerated by tests/update-lib-digests.sh (tests/run-tests.sh fails while it is stale); never edit a digest by hand.
 # BEGIN LIB MANIFEST
 LIB_MANIFEST=(
-  "7ccb59b6ae61d4a27bfd6e42c3603127931bd015883a7fa4fc06e561a1f3bbf9  lib/env.sh"
-  "5a68e83fd398046d811e493420e1c96a521d5e09fd107c2d56f6ddaec3ff9ee9  lib/common.sh"
+  "74b4566bc18e93c3e2ea538629f13fa29284d2b7be5eb6e017376b0175e5e7ed  lib/env.sh"
+  "72e0994e9cad2cd630cef212638cd2a81c04b6dce47843e110038f76bd515293  lib/common.sh"
   "7d16efd143248f07ff29a3e233afde2d6138a8e4f0962e69430d99a6a3775d5a  lib/state.sh"
-  "de04dda6015382dac203843bb3d42022e8953500362963160b7eefdc8e516291  lib/prereq.sh"
+  "bef89409c45b5f23d264eb70d4a1f0ad7ae211c7d4e4c5288c46ca9dd7f096cc  lib/prereq.sh"
   "cd13c3ceaf025e7b588db06cfc49c09c2387856252830575a17465cd61fb1f4d  lib/installation.sh"
   "a4b6b957711f0dc58f120864638d71e09c2b454eaf19ed54ad1d78d8e48ec941  lib/source.sh"
-  "f47a00d1cc99e084b291ebf84629d2c76a3f3a8cb45eb80417bccec2d3e8f647  lib/ops-install.sh"
+  "26092336d1610412984c55fa4569de3d9001159171adba69d8a732c3ca78cffa  lib/discover.sh"
+  "5ac6b32a6834eeedb1d3e2d2484a0069800e1a915435aa128e00e755edba0c06  lib/api-keys.sh"
+  "2f7816e4ba41f670e20e2fca7cafbc7c62c664c85fd1eec5911cbc5a01ebb5d2  lib/api-catalogue.sh"
+  "1346801899a84fd7062acfdb306d124f10bcb8d630e6b88f183ad96baa658c25  lib/db-tool.sh"
+  "17435eed0a8d10406638c6e6f3a72b5ec3ab5b890d308e6f87d2381384409450  lib/db-deploy.sh"
+  "a1c5b0ec64c54ed4a5babd43389974a26b3b528b497e698542c48625657a9307  lib/ops-install.sh"
   "f9d672108166958b5dbb7dab4d03adc3c0a952adeb0818bfc62d0fd470d39e71  lib/ops-upgrade.sh"
   "fd17695ed722df47dc555a5123725c3ead4eacd7d6a40691ebab5d3bb8dbc1c5  lib/ops-deinstall.sh"
-  "0b76b8e427643dc63e031f0fc75e25f4836ae70f3381617d844635828010e1b5  lib/ops-credentials.sh"
+  "16968d75e23f7c223750c780e899db88277794bb24cc87a434aaea039917c0a2  lib/ops-credentials.sh"
+  "14308d89bbd18b2b0564dbb1a5f1db8d36c77ad7866776739a00f8ef3a920794  lib/ops-views.sh"
   "45ee4226ce47482e088bcb07b9f76ddfc9049cecebe88aebd8d1c313000d06a5  lib/check-startup.sh"
   "9c929e38522221cad99c24727e53de351fe5ea1b30dc165c7b174fae2f8f07dd  lib/ops-status.sh"
   "1a09e62a09f12ad8a51db286f622886cd5d14f544f4f0926c16642e33fab4861  lib/ops-validate.sh"
-  "d9b96ade7cf46e92d61266aac72376191cacbccccb788a3f5585450f5d11ff34  lib/menu.sh"
+  "412b9a33ca4f7937b626968bca2021853233b94be72afff59f0ffb4439af9b89  lib/menu.sh"
 )
 # END LIB MANIFEST
 
@@ -95,8 +122,17 @@ LIB_MANIFEST=(
 #    sourced. Files in lib/ that are not listed are never sourced.
 #  * Sourced (the test suite): the libraries are verified and sourced at load; main() then runs the ownership check against
 #    ADMIN_UID (see ldr_check_sourced_install).
+#  * Executed as root from an UNPROTECTED path (for example a clone in a directory owned by the oracle account), 0.3.0 no
+#    longer just refuses: it explains the risk, and after a typed "yes" on a terminal copies the entry script and the listed
+#    libraries into a new root-only directory (LOADER_COPY_BASE/oracle-ops-installer-copy.XXXXXXXX, 0700), runs the copy as a
+#    child (whose own loader verifies the whole path and every digest again), removes the copy and exits with the child's
+#    status. The copy protects the run against changes made WHILE it runs; it cannot prove that nobody changed the files
+#    before (README "Download and run": compare the entry script's SHA-256 with the published one).
 # Any failure prints a message on stderr and returns 2 (sourced) or exits 2 (executed); no library code has run.
 LOADER_ADMIN_UID=0
+LOADER_COPY_BASE="/var/lib"
+# Test seam: treat standard input as a terminal for the copy question. Reset here, so the environment cannot preset it.
+LOADER_ASSUME_TTY=""
 # Test seam: an owner accepted besides root by the ownership check. Always empty in a real run (reset here, so the environment
 # cannot preset it); tests/lib.sh and the integrity tests set it after sourcing, in a subshell.
 LOADER_TEST_UID=""
@@ -174,9 +210,53 @@ ldr_check_secure() {
   done
 }
 
-# ldr_run <entry script path> <1 if executed, 0 if sourced> <effective uid>: the whole loader; returns 2 on any failure.
+# ldr_copy_and_run <arguments of the run...>: the unprotected-path case described above. Returns 2 when the operator does not
+# confirm or the copy cannot be made; otherwise it EXITS with the status of the copied installer.
+ldr_copy_and_run() {
+  local _ld_a _ld_copy _ld_item _ld_rel _ld_rc=0 _ld_mktemp _ld_cp _ld_mkdir _ld_chmod _ld_rm
+  ldr_find_tool _ld_mktemp mktemp && ldr_find_tool _ld_cp cp && ldr_find_tool _ld_mkdir mkdir \
+    && ldr_find_tool _ld_chmod chmod && ldr_find_tool _ld_rm rm || { ldr_fail "mktemp, cp, mkdir, chmod and rm are required in /usr/bin or /bin"; return 2; }
+  {
+    printf '\nThe installer files in %s can be changed by an account other than root.\n' "$LOADER_ENTRY_DIR"
+    printf 'Anyone with that account could have changed what root is about to run. Continue only if you trust it\n'
+    printf '(compare: sha256sum %s  with the value published for this release).\n' "$LOADER_ENTRY_FILE"
+    printf 'The installer can copy itself into a new root-only directory under %s and run from there,\n' "$LOADER_COPY_BASE"
+    printf 'so nothing can change it during the run. The copy is removed at the end.\n'
+  } >&2
+  if [ -z "$LOADER_ASSUME_TTY" ] && [ ! -t 0 ]; then
+    ldr_fail "no terminal to confirm that: run it from a terminal, or from a root-owned directory (README, \"Download and run\")"
+    return 2
+  fi
+  printf 'Copy the installer and continue? Type "yes": ' >&2
+  IFS= read -r _ld_a || _ld_a=""
+  [ "$_ld_a" = "yes" ] || { ldr_fail "not confirmed; nothing was run"; return 2; }
+  _ld_copy="$(umask 077; "$_ld_mktemp" -d "$LOADER_COPY_BASE/oracle-ops-installer-copy.XXXXXXXX")" \
+    || { ldr_fail "cannot create a copy directory in $LOADER_COPY_BASE"; return 2; }
+  if ! ( umask 077
+         "$_ld_cp" -- "$LOADER_ENTRY_FILE" "$_ld_copy/oracle-ops-installer.sh" && "$_ld_mkdir" -m 0700 -- "$_ld_copy/lib" || exit 1
+         for _ld_item in "${LIB_MANIFEST[@]}"; do
+           _ld_rel="${_ld_item#*  }"
+           [ -f "$LOADER_ENTRY_DIR/$_ld_rel" ] && [ ! -L "$LOADER_ENTRY_DIR/$_ld_rel" ] || exit 1
+           "$_ld_cp" -- "$LOADER_ENTRY_DIR/$_ld_rel" "$_ld_copy/$_ld_rel" || exit 1
+         done
+         "$_ld_chmod" 0700 -- "$_ld_copy" ); then
+    "$_ld_rm" -rf --one-file-system -- "$_ld_copy"
+    ldr_fail "the installer could not be copied (a listed library is missing or not a regular file)"
+    return 2
+  fi
+  printf 'Running the copy in %s\n\n' "$_ld_copy" >&2
+  trap ':' INT TERM HUP     # the copy handles the interrupt; this process only waits for it and cleans up
+  "${BASH:-/bin/bash}" "$_ld_copy/oracle-ops-installer.sh" "$@" || _ld_rc=$?
+  trap - INT TERM HUP
+  "$_ld_rm" -rf --one-file-system -- "$_ld_copy" || printf 'Warning: could not remove %s\n' "$_ld_copy" >&2
+  exit "$_ld_rc"
+}
+
+# ldr_run <entry script path> <1 if executed, 0 if sourced> <effective uid> [run arguments...]: the whole loader; returns 2 on
+# any failure.
 ldr_run() {
   local _ld_src="$1" _ld_exec="$2" _ld_euid="$3" _ld_dir _ld_item _ld_digest _ld_rel _ld_file _ld_got _ld_files=()
+  shift 3
   if [ -z "$_ld_src" ]; then
     ldr_fail "cannot locate the installer's own files: the script name is empty (run it from a file, not from standard input)"
     return 2
@@ -191,7 +271,7 @@ ldr_run() {
   LOADER_ENTRY_DIR="$_ld_dir"
   LOADER_ENTRY_FILE="$_ld_dir/${_ld_src##*/}"
   if [ "$_ld_exec" = 1 ] && [ "$_ld_euid" = "$LOADER_ADMIN_UID" ]; then
-    ldr_check_secure "$LOADER_ENTRY_DIR" "$LOADER_ENTRY_FILE" "$LOADER_TEST_UID" || return 2
+    ldr_check_secure "$LOADER_ENTRY_DIR" "$LOADER_ENTRY_FILE" "$LOADER_TEST_UID" || ldr_copy_and_run "$@" || return 2
   fi
   [ "${#LIB_MANIFEST[@]}" -gt 0 ] || { ldr_fail "the library manifest is empty"; return 2; }
   for _ld_item in "${LIB_MANIFEST[@]}"; do
@@ -253,7 +333,7 @@ main() {
 }
 
 [ "${BASH_SOURCE[0]:-}" != "$0" ] || LOADER_EXECUTED=1
-ldr_run "${BASH_SOURCE[0]:-}" "$LOADER_EXECUTED" "$EUID" || { return 2 2>/dev/null || exit 2; }
+ldr_run "${BASH_SOURCE[0]:-}" "$LOADER_EXECUTED" "$EUID" "$@" || { return 2 2>/dev/null || exit 2; }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   main "$@"

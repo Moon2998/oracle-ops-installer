@@ -19,6 +19,9 @@ sanitize_stream() {
   esc="$(printf '\033')"
   while IFS= read -r line || [ -n "$line" ]; do
     if [ -n "$TOKEN" ]; then line="${line//"$TOKEN"/[REDACTED]}"; fi
+    if [ -n "$API_KEY_REDACT_1" ]; then line="${line//"$API_KEY_REDACT_1"/[REDACTED]}"; fi
+    if [ -n "$API_KEY_REDACT_2" ]; then line="${line//"$API_KEY_REDACT_2"/[REDACTED]}"; fi
+    if [ -n "$OWNER_PW" ]; then line="${line//"$OWNER_PW"/[REDACTED]}"; fi
     printf '%s\n' "$line"
   done | sed -r \
       -e "s/${esc}\\[[0-9;?]*[A-Za-z]//g" \

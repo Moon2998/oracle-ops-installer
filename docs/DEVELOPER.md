@@ -7,16 +7,26 @@ oracle-ops-installer.sh   entry: INSTALLER_VERSION, the pinned Oracle OPS releas
                           manifest (OPS_FILE_MANIFEST, used by "validate"), the library manifest (LIB_MANIFEST), the library
                           loader (ldr_*) and main()
 lib/env.sh                host locations and limits (plain globals), the seams (is_root, stdin_is_tty, host_arch, is_tmpfs,
-                          service_active, root_home, service_state, proc_owner_exe, run_as_repo_owner)
+                          service_active, root_home, service_state, proc_owner_exe, run_as_repo_owner, account_uid, group_gid,
+                          port_in_use, memory_total_mb, restart_service, clear_screen)
 lib/common.sh             output and logging, child processes, ending a run, prompts, validation helpers
 lib/state.sh              the protected log, lock and staging directory (the menu start-up)
 lib/prereq.sh             prerequisites
 lib/installation.sh       the existing installation and its verification
 lib/source.sh             token, access check, download, verification
-lib/ops-install.sh, ops-upgrade.sh, ops-deinstall.sh, ops-credentials.sh   the four actions
+lib/discover.sh           read-only environment discovery for Fresh Installation (0.3.0)
+lib/api-keys.sh           the two REST API keys: generate, write (never replace), replace (Reconfigure), strict read, menu 7
+lib/api-catalogue.sh      the API catalogue of the pinned release and menu 6 View APIs (status from the service log)
+lib/db-tool.sh            the database tool's Java source (OpsSchemaDeploy: split / check / deploy), written into the run dir
+lib/db-deploy.sh          the DBA SQL, the verified copy of the release's database scripts, the OPS_OWNER step
+lib/ops-install.sh        Fresh Installation (menu 1): questions, review, DBA SQL, JDK, database objects, keys, setup
+                          assistant, network listener, final validation, key display
+lib/ops-upgrade.sh, ops-deinstall.sh   Upgrade (menu 2), Uninstall (menu 9)
+lib/ops-credentials.sh    Reconfigure (menu 3): WebLogic credential, DB password guidance, regenerate the API keys
+lib/ops-views.sh          menu 8 View Configuration (read-only)
 lib/check-startup.sh      the strict command-line start-up and exit of status/validate; prune_check_logs for the menu start-up
 lib/ops-status.sh         the status items, the item runner, op_status (menu 5)
-lib/ops-validate.sh       the pinned-source checks, validate_run, op_validate (menu 6)
+lib/ops-validate.sh       the pinned-source checks, validate_run, op_validate (menu 4)
 lib/menu.sh               usage, parse_args, parse_check_args, menu
 README.md                 operator documentation
 SECURITY.md               protections and known limitations
@@ -27,7 +37,12 @@ tests/installer-test.sh   the install/upgrade/de-install/credential tests and th
 tests/check-tests.sh      the status/validate tests, the security-boundary tests, the static guard tests (sourced by the above)
 tests/lib.sh              sandbox, fixture repository, test doubles, assertions
 tests/update-lib-digests.sh   regenerates (or --check) the library manifest in the entry script
-tests/compare-command-sequences.sh   proves the split behaves like the single-file installer 96c8b73 (tests/baseline/)
+tests/compare-command-sequences.sh   proved the 0.2.0 split behaved like the single-file installer 96c8b73 (tests/baseline/);
+                          RETIRED from run-tests.sh in 0.3.0 (the menu and the install flow changed on purpose)
+tests/db-check.py         OPS_DB_SCRIPTS digests, the DBA view list and the SQL splitter against the pinned source (needs a JDK;
+                          NOT RUN without one or without the pinned commit)
+tests/api-catalogue-check.py   the API catalogue, key file names, minimum key length and start-up log lines against the
+                          source of the pinned Oracle OPS commit (local repository; NOT RUN if the commit is not there)
 tests/mutation-tests.sh, tests/mutations.py   injects harmful changes into copies; each must be detected
 tests/guard-scan.py       the static guard: command-position scanner and its rules
 tests/online-check.sh     optional: real git + github.com with a deliberately invalid token
@@ -77,6 +92,10 @@ python3 -I tests/guard-scan.py check .              # the static guard; "selftes
 To run a group of tests, pass names or prefixes that end in `_`: `bash tests/installer-test.sh test_status_ test_validate_`.
 
 ### The comparison harness (single-file baseline vs this code)
+
+**Retired in 0.3.0** (no longer run by `tests/run-tests.sh`): 0.3.0 changes the menu and the Fresh Installation flow on
+purpose, so the comparison with the 0.1.0 single-file installer no longer applies. The description below is the 0.2.0
+record.
 
 `tests/baseline/oracle-ops-installer-96c8b73.sh` is the single-file installer at commit 96c8b73 (SHA-256 pinned in the
 comparison script). For each of the 58 baseline tests, every `run_installer` call is run against the baseline (menu
@@ -180,6 +199,12 @@ hostile `BASH_ENV`), `--java-archive`, the credential manager paths and every up
 | Real installer, non-root, on the host | run: refuses with exit 2 and creates nothing |
 | ShellCheck | **not run** (not installed on the development host) |
 | A real root run with a valid token: download, Oracle OPS scripts, systemd | **not run** |
+| 0.3.0 (2026-11-11): `tests/run-tests.sh` on OL7.9 | run: bash -n clean; manifest current; installer tests **137 passed, 0 failed** (116 earlier + 21 new: key creation/keep/refusal, account and listener validation, no change before the review `yes`, missing API routes, no random data, menu hints, View API Keys, View APIs, View Configuration, key regeneration); API catalogue check **PASS** against `63fb7c1` (8 routes); mutation tests PASS (21 detected) |
+| 0.3.0 catalogue check mutations (a route removed, POST listed as GET) | each one detected |
+| 0.3.0 second build (2026-11-11): `tests/run-tests.sh` | run: installer tests **154 passed, 0 failed** (adds the DBA SQL, the database step's paths - wrong/locked/unreachable login, missing prerequisites, complete/partial schema, failed deploy, digest mismatch, JDK failure - the network listener and its restore, the self-copy); `tests/db-check.py` **PASS** (digests, DBA view list, splitter on the four real scripts: 11/6/6/11 statements, and 6 edge cases); catalogue check PASS; mutation tests PASS |
+| Database tool with the real JDBC driver against a closed port | run: exit 5, "The Network Adapter could not establish the connection", password not printed; malformed URL refused (exit 2) |
+| Database tool against a real Oracle database (check and deploy as OPS_OWNER) | **not run**: no disposable PDB here, and the UAT schema already exists. First real run = the new application/database server pair |
+| 0.3.0 real root run (Fresh Installation end to end, self-copy, key creation in the real `/etc/oracle-ops`, network listener) | **not run** |
 
 ## The Oracle OPS interface this installer depends on
 
@@ -253,6 +278,28 @@ The pin is `OPS_COMMIT`, `OPS_VERSION` and `SUPPORTED_PLATFORMS` near the top of
 | D6 | The release is pinned to commit `5a13cf4456c4ed3361c74aaa39e5d36b257af894` (VERSION 0.1.5). Oracle OPS has no release tags. Moved since: `d080ad0` (0.1.8), then `63fb7c162c6b7076129b8a1f02b7bdb9b2dd44f5` (0.1.9, 2026-10-29; pushed to `main`, still no protected tag). | repository owner |
 | D7 | Verification checks the build's stamped commit, not just VERSION, because the reference host runs a 0.1.5 build from different code. | implementation |
 | D8 | De-install uses Oracle OPS's non-destructive `retire` (rename, no deletion). Upgrade requires typed confirmation. A failed post-upgrade health check is reported, never rolled back automatically (as in Oracle OPS). | implementation, following Oracle OPS |
+
+## 0.3.0 decisions (2026-11-11): interactive universal menu, REST API keys
+
+| | Decision | Decided by |
+|---|---|---|
+| U1 | The installer stays a separate repository: the operator clones it and runs `oracle-ops-installer.sh`, which installs Oracle OPS (it supersedes the recommendation to move it into the Oracle OPS repository, D-12 of the Oracle OPS installer design). Built on the 0.2.0 library split (branch `t2-status-validate`), in branch `interactive-installer`. | human (2026-11-11) |
+| U2 | Menu: 1 Fresh Installation, 2 Upgrade Existing Installation, 3 Reconfigure Installation, 4 Validate Environment, 5 View Installation Status, 6 View APIs, 7 View API Keys, 8 View Configuration, 9 Uninstall Oracle OPS, 10 Exit. Backup/Recovery was removed from the plan. An item that does not apply stays visible with the reason. | human |
+| U3 | Fresh Installation automatically creates **both** API keys (read and control) in `/etc/oracle-ops`. This reverses D2's "never write `/etc/oracle-ops`" for these two files only. | human |
+| U4 | Menu 7 View API Keys shows a key from `/etc/oracle-ops` on screen (after typing `SHOW`; never logged; screen cleared). This answers the Oracle OPS design question D-17 (hand-off) with "on screen via a menu option", not a hand-off file. | human |
+| U5 | The installer asks the service account and the REST API listener itself (it needs the group for the key files) and passes them, plus `--enable-api`, to Oracle OPS's setup assistant as options; the assistant still asks for the database and EBS settings and keeps its own summary and confirmation. | implementation |
+| U6 | ~~Database objects are not deployed by the installer~~ - superseded the same day by U12. | implementation (scope) |
+| U7 | The API catalogue is a maintained registry in `lib/api-catalogue.sh`, checked against the pinned source by `tests/api-catalogue-check.py`; status comes only from the service's own start-up line `API routes served: [...]`. | implementation |
+| U8 | Start/stop (POST) is created with the release and its key, but stays off (`ebs.control.enabled: false`) after installation, as Oracle OPS's `docs/12` requires a separate, approved step to turn it on. | implementation, following Oracle OPS |
+| U9 | Final validation is mandatory: success only if the service, release, commit, database health line, API routes (with `/api/v1/ops/status`), both key files and `service-identity.sh check` all pass. | implementation |
+| U10 | Reconfigure > Regenerate the API keys replaces the chosen key(s) atomically, keeps no copy of the old key, and restarts only if the operator says so. | implementation |
+| U11 | Clone anywhere: an unprotected installer path is no longer only refused; after a typed `yes` the installer copies itself into a root-only directory and runs the copy (the 0.2.0 refusal stays for runs without a terminal). | human (2026-11-11: "user clone the ops installer wherever they want") |
+| U12 | The DBA creates the schema with fixed names (`OPS_DATA`, `OPS_OWNER`, `OPS_RUNTIME`) from SQL the installer writes and shows; the installer creates the tables and packages itself, logged in as `OPS_OWNER` (approved D-01/D-02 of the Oracle OPS design). No change to the private Oracle OPS repository: its scripts run unchanged, because the DBA SQL grants `OPS_OWNER` SELECT on the ten `DBA_*` views they check. | human (2026-11-11) |
+| U13 | SQL runner: the installer's own Java tool on the release's private JDK and JDBC driver (no Oracle client on the application server), restricted SQL*Plus subset, every file parsed before the login. | implementation (recommended, not objected to) |
+| U14 | The `OPS_OWNER` password is asked once per run (check + creation), one retry on ORA-01017 only. | implementation (simplicity; Oracle OPS design D-33 recommended two prompts) |
+| U15 | Separate application and database servers: a non-loopback bind address with the APEX/ORDS client addresses over plain HTTP is set after the setup assistant (which accepts loopback only). With Oracle OPS 0.1.9 only About and Status are served to another host; opening the other GET APIs needs an Oracle OPS runtime change, deferred by the human ("1st will work on installer, don't touch API changes now"). | human (2026-11-11) |
+| U16 | Both API keys are shown at the end of a successful installation (and stay available in menu 7). | human (2026-11-11) |
+| U17 | Start/stop (POST) is checked later; it stays off. | human (2026-11-11) |
 
 ## T2 decisions (2026-11-03): split, status, validate
 

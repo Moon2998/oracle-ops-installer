@@ -28,11 +28,15 @@ echo "== installer tests =="
 bash tests/installer-test.sh "$@" || status=1
 
 echo "== command-sequence comparison with the single-file baseline =="
-if [ $# -eq 0 ]; then
-  bash tests/compare-command-sequences.sh || status=1
-else
-  echo "SKIPPED: a single test was selected"
-fi
+# Retired with 0.3.0: it proved that the 0.2.0 library split kept the 0.1.0 behaviour; the 0.3.0 menu and Fresh
+# Installation flow change that behaviour on purpose. The script and its baseline stay for the 0.2.0 history.
+echo "RETIRED: see tests/run-tests.sh (0.3.0 changes the menu and the installation flow on purpose)"
+
+echo "== API catalogue against the pinned Oracle OPS source =="
+python3 -I tests/api-catalogue-check.py || status=1
+
+echo "== database scripts and SQL splitter against the pinned Oracle OPS source =="
+python3 -I tests/db-check.py || status=1
 
 echo "== mutation tests (read-only checks) =="
 if [ $# -eq 0 ]; then

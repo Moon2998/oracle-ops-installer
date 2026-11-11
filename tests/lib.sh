@@ -5,8 +5,17 @@
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # INSTALLER_UNDER_TEST lets tests/compare-command-sequences.sh run the same tests against the vendored baseline installer.
 INSTALLER="${INSTALLER_UNDER_TEST:-$REPO_ROOT/oracle-ops-installer.sh}"
-# The menu number of "Exit": 7 in this release; tests/compare-command-sequences.sh sets 5 for the single-file baseline 96c8b73.
-MENU_EXIT="${MENU_EXIT:-7}"
+# The menu number of "Exit": 10 in this release (0.3.0). tests/compare-command-sequences.sh (retired with 0.3.0) set 5 / 7.
+MENU_EXIT="${MENU_EXIT:-10}"
+# Fresh Installation answers after the installation directory: service user, group (default: the user's primary group),
+# REST API bind address (default 127.0.0.1), port, and the "yes" of the review screen.
+TEST_API_PORT=18888
+TEST_OWNER_PW='Owner-Pw_0123456789-secret'
+# service user, group (default), database host, port (default 1521), service name, API bind (default 127.0.0.1), API port,
+# the review "yes", and "2" = the DBA has already created the schema
+ANS=("$(id -un)" "" dbhost.example "" OPSPDB "" "$TEST_API_PORT" yes 2)
+# after the access token: the OPS_OWNER password, "yes" to create the objects, "yes" for the setup assistant, Enter after the keys
+POST=("$TEST_OWNER_PW" yes yes "")
 # Record mode (COMPARE_MODE=1, set only by tests/compare-command-sequences.sh): fail() records the assertion instead of
 # exiting, and every run_installer call dumps what it did into $COMPARE_OUT/<test>/run<N>/ (see compare_record below).
 COMPARE_MODE="${COMPARE_MODE:-0}"
@@ -21,6 +30,8 @@ FIXTURE=""
 FIX_COMMIT=""        # the commit the tests pin (service/VERSION 0.1.5)
 FIX_LATER_COMMIT=""  # a later commit on the default branch (service/VERSION 0.1.6) that must never be installed
 FIX_VERSION="0.1.5"
+FIX_DB_SCRIPTS=()
+DB_FIXTURE_FILES="db/migrations/V4_001__create_ops_run.sql db/migrations/V4_002__create_ops_run_api.sql db/migrations/V5_001__add_ops_run_get_run.sql docs/12-ddl/V8_001__create_ops_wls_action.sql docs/12-ddl/V8_001__ops_wls_action_api_body.sql"
 TEST_TOKEN="ghp_TESTtoken0123456789abcdefABCDEF012345"
 OPS_URL="https://github.com/Moon2998/oracle-ops.git"
 SB=""
@@ -100,6 +111,7 @@ activate() {  # <home> <version>
   ln -sfn "$1/releases/$2" "$1/current"
   echo active > "$SYSTEMCTL_STATE"
   echo "2026-10-26 10:00:00.000 INFO Database connectivity startup health check: ${HEALTH:-HEALTHY} (1ms)" >> "$1/logs/oracle-ops.log"
+  [ "${ROUTES_MODE:-ok}" = none ] || echo "2026-10-26 10:00:00.100 INFO [com.oracleops.core.OracleOpsService] API routes served: [/api/v1/about, /api/v1/ops/status, /api/v1/linux/host, /api/v1/node/identity]" >> "$1/logs/oracle-ops.log"
 }
 write_unit() {  # <home>
   mkdir -p "$(dirname "$UNIT_FILE")"
@@ -112,8 +124,8 @@ STUB
   cat > "$1/deploy/scripts/deploy-oracle-ops.sh" <<'STUB'
 #!/bin/bash
 . "$(dirname "$0")/_stub.sh"
-home=""
-while [ $# -gt 0 ]; do case "$1" in --home) home="$2"; shift 2 ;; --java-archive) shift 2 ;; *) shift ;; esac; done
+home=""; bind=""; port=""
+while [ $# -gt 0 ]; do case "$1" in --home) home="$2"; shift 2 ;; --api-bind-address) bind="$2"; shift 2 ;; --api-port) port="$2"; shift 2 ;; --java-archive) shift 2 ;; *) shift ;; esac; done
 echo "== Oracle OPS guided deployment (test double) =="
 case "${DEPLOY_MODE:-ok}" in
   fail) echo "deploy-oracle-ops: ERROR: the database validation failed; nothing was deployed" >&2; exit 1 ;;
@@ -125,6 +137,7 @@ IFS= read -r a || exit 1
 c="$(short_commit)"
 [ "${DEPLOY_MODE:-ok}" != wrongcommit ] || c=deadbee
 make_release "$home" "$(src_version)" "$c"
+printf 'ops:\n  node: n1\napi:\n  enabled: true\n  bind-address: "%s"\n  port: %s\n  admission:\n    queue-capacity: 20\nebs:\n  enabled: false\n' "$bind" "$port" > "$home/config/application.yaml"
 write_unit "$home"
 [ "${DEPLOY_MODE:-ok}" = nocurrent ] || activate "$home" "$(src_version)"
 echo "  [PASS] health"
@@ -200,7 +213,16 @@ esac
 echo "configuration is valid"
 STUB
   printf '# placeholder (fixture)\n' > "$1/deploy/scripts/ownership-lib.sh"
-  printf '# placeholder (fixture)\n' > "$1/deploy/scripts/provision-java.sh"
+  cat > "$1/deploy/scripts/provision-java.sh" <<'STUB'
+#!/bin/bash
+. "$(dirname "$0")/_stub.sh"
+home=""
+while [ $# -gt 0 ]; do case "$1" in --home) home="$2"; shift 2 ;; --group|--archive) shift 2 ;; *) shift ;; esac; done
+[ "${JDK_MODE:-ok}" != fail ] || { echo "provision-java: ERROR: checksum mismatch" >&2; exit 4; }
+mkdir -p "$home/runtime/java/21.0.12.1/bin"
+printf '#!/bin/sh\nexit 0\n' > "$home/runtime/java/21.0.12.1/bin/java"; chmod 0755 "$home/runtime/java/21.0.12.1/bin/java"
+echo "Private JDK ready (test double)"
+STUB
   chmod 0755 "$1"/deploy/scripts/*.sh
 }
 
@@ -219,7 +241,12 @@ make_fixture() {
   local d="$TEST_ROOT/fixture"
   mkdir -p "$d/service" "$d/deploy/scripts" "$TEST_ROOT/fixhome"
   printf '%s\n' "$FIX_VERSION" > "$d/service/VERSION"
-  printf '#!/bin/bash\necho "fixture build"\n' > "$d/service/build.sh"
+  mkdir -p "$d/service/vendor" "$d/db/migrations" "$d/docs/12-ddl"
+  printf 'fake jdbc driver\n' > "$d/service/vendor/ojdbc8-19.27.0.0.jar"
+  printf '#!/bin/bash\necho "fixture build"\nOJDBC8_JAR="vendor/ojdbc8-19.27.0.0.jar"\nOJDBC8_SHA256="%s"\n' \
+    "$(sha256sum < "$d/service/vendor/ojdbc8-19.27.0.0.jar" | cut -d' ' -f1)" > "$d/service/build.sh"
+  local f
+  for f in $DB_FIXTURE_FILES; do printf -- '-- fixture %s\nselect 1 from dual;\n' "$f" > "$d/$f"; done
   printf 'jdk.version=21.0.12.1\njdk.platforms=ol:7\n' > "$d/deploy/java-runtime.properties"
   write_stub_library "$d"
   ( cd "$d" && export HOME="$TEST_ROOT/fixhome" GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid \
@@ -227,6 +254,14 @@ make_fixture() {
     "$REAL_GIT" init -q . && "$REAL_GIT" add -A && "$REAL_GIT" commit -q -m "fixture release 0.1.5" ) || return 1
   FIX_COMMIT="$(cd "$d" && "$REAL_GIT" rev-parse HEAD)"
   fixture_manifest "$d" "$FIX_COMMIT"
+  FIX_DB_SCRIPTS=(
+    "$(sha256sum < "$d/db/migrations/V4_001__create_ops_run.sql" | cut -d' ' -f1)  run  db/migrations/V4_001__create_ops_run.sql"
+    "$(sha256sum < "$d/db/migrations/V4_002__create_ops_run_api.sql" | cut -d' ' -f1)  run  db/migrations/V4_002__create_ops_run_api.sql"
+    "-  grant  ops_run_api"
+    "$(sha256sum < "$d/db/migrations/V5_001__add_ops_run_get_run.sql" | cut -d' ' -f1)  run  db/migrations/V5_001__add_ops_run_get_run.sql"
+    "$(sha256sum < "$d/docs/12-ddl/V8_001__create_ops_wls_action.sql" | cut -d' ' -f1)  run  docs/12-ddl/V8_001__create_ops_wls_action.sql"
+    "$(sha256sum < "$d/docs/12-ddl/V8_001__ops_wls_action_api_body.sql" | cut -d' ' -f1)  include  docs/12-ddl/V8_001__ops_wls_action_api_body.sql"
+  )
   printf '0.1.6\n' > "$d/service/VERSION"
   ( cd "$d" && export HOME="$TEST_ROOT/fixhome" GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid \
       GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid
@@ -258,7 +293,7 @@ new_sandbox() {
   printf 'NAME="Oracle Linux Server"\nVERSION="7.9"\nID="ol"\nVERSION_ID="7.9"\n' > "$SB/etc/os-release"
   link_tools "$SB/bin" bash sh cat ls ln mkdir rm rmdir mv cp install chmod chown chgrp stat readlink mktemp date sed awk \
     grep find sort head tail tr cut tee env getent id uname df timeout flock setpriv sha256sum cmp tar gzip unzip \
-    python3 sleep kill touch wc dirname basename stty xargs od true false comm diff printf
+    python3 sleep kill touch wc dirname basename stty xargs od true false comm diff printf ip
   # git test double: authentication goes through the installer's real askpass helper and token file.
   cat > "$SB/reserve/git" <<EOF
 #!/bin/bash
@@ -342,6 +377,35 @@ exit 1
 EOF
     chmod 0755 "$SB/bin/$ft"
   done
+  cat > "$SB/fake-dbtool" <<EOF
+#!/bin/bash
+# Test double of the database tool: records its arguments and what it got on stdin (never the value), answers from dbtool.conf.
+. '$SB/dbtool.conf'
+IFS= read -r pw || pw=""
+mode="\$1"
+{ printf 'args=%s\n' "\$*"
+  if [ "\$pw" = '$TEST_OWNER_PW' ]; then echo "pw=expected"; else echo "pw=other"; fi
+  if env | grep -qF -- '$TEST_OWNER_PW'; then echo "pwenv=1"; fi
+  case "\$*" in *'$TEST_OWNER_PW'*) echo "pwargv=1" ;; esac
+  printf 'cwd=%s files=%s\n' "\$PWD" "\$(ls | tr '\n' ' ')"
+} >> '$SB/dbtool-trace'
+n=\$(cat '$SB/dbtool-calls' 2>/dev/null || echo 0); n=\$((n + 1)); echo \$n > '$SB/dbtool-calls'
+case "\$LOGIN" in
+  wrong) echo "ERROR login as OPS_OWNER failed: ORA-01017: invalid username/password"; exit 3 ;;
+  wrong-once) if [ "\$n" = 1 ]; then echo "ERROR login as OPS_OWNER failed: ORA-01017"; exit 3; fi ;;
+  locked) echo "ERROR login as OPS_OWNER failed: ORA-28000: the account is locked"; exit 4 ;;
+  down) echo "ERROR login as OPS_OWNER failed: IO Error: The Network Adapter could not establish the connection"; exit 5 ;;
+esac
+echo "RESULT session-user PASS connected as OPS_OWNER"
+if [ "\$PREREQ" = fail ]; then echo "RESULT dictionary-views FAIL not readable (the DBA SQL grants SELECT on them): DBA_USERS"; echo "STATE EMPTY objects=0/6"; exit 1; fi
+echo "RESULT dictionary-views PASS 10 DBA_ views readable"
+if [ "\$mode" = check ]; then echo "STATE \$STATE objects=x"; exit 0; fi
+echo "RUN V4_001__create_ops_run.sql"
+if [ "\$DEPLOY" = fail ]; then echo "ERROR ORA-00942: table or view does not exist"; exit 1; fi
+echo "STATE COMPLETE objects=6/6 valid=6 grants=2/2"
+EOF
+  chmod 0755 "$SB/fake-dbtool"
+  printf 'LOGIN=ok\nSTATE=EMPTY\nPREREQ=ok\nDEPLOY=ok\n' > "$SB/dbtool.conf"
   {
     printf 'AUTH_BASE=%q\nSTATE_DIR=%q\nUNIT_FILE=%q\nCRED_DIR=%q\n' "$SB/run" "$SB/var/lib/oracle-ops-installer" \
       "$SB/etc/systemd/system/oracle-ops.service" "$SB/etc/oracle-ops"
@@ -386,6 +450,13 @@ run_installer() {
     stdin_is_tty() { return 0; }
     root_home() { printf '%s' "$SB/roothome"; }
     is_tmpfs() { [ "$TEST_TMPFS" = 1 ]; }
+    port_in_use() { [ -e "$SB/port-busy-$2" ]; }   # seam: no real connection from the tests
+    tcp_open() { [ ! -e "$SB/db-down" ]; }
+    local_addresses() { printf '127.0.0.1\n10.1.2.3\n'; }
+    db_tool_exec() { shift; ( cd "$RUN_DIR/db" && "$SB/fake-dbtool" "$@" ); }   # seam: same working directory as the real tool
+    OPS_DB_SCRIPTS=("${FIX_DB_SCRIPTS[@]}")
+    restart_service() { echo "restart" >> "$SB/systemctl-trace"; echo "2026-11-11 10:00:00.000 INFO [x] API routes served: [/api/v1/about, /api/v1/ops/status]" >> "${INST_HOME:-$TARGET_HOME}/logs/oracle-ops.log"; }
+    clear_screen() { echo "<CLEAR-SCREEN>"; }
     eval "$EXTRA"
     main "$@"
   ) < "$SB/in" > "$SB/out" 2>&1

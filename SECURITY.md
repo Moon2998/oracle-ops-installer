@@ -1,8 +1,9 @@
 # Security
 
 The Oracle OPS Installer runs as root, holds a GitHub access token for a few seconds, downloads private source code
-and runs the Oracle OPS deployment scripts from it. This document describes how each of those is protected, and what
-is **not** protected.
+and runs the Oracle OPS deployment scripts from it. Since 0.3.0 it also creates, replaces and displays the two Oracle
+OPS REST API keys, writes the DBA SQL for the schema, and creates the Oracle OPS tables and packages logged in as
+OPS_OWNER. This document describes how each of those is protected, and what is **not** protected.
 
 ## Token handling
 
@@ -184,6 +185,76 @@ libraries): a list of the SHA-256 of exactly six files at the pinned commit (`OP
   `.gitattributes` of the pinned commit is part of the pinned commit (and the digest check detects a changed result).
 - A non-root account that owns the repository can make `validate` fail (denial of service), never run its code as root.
 
+## REST API keys (0.3.0)
+
+The installer writes exactly two secret files of Oracle OPS, both at the fixed paths Oracle OPS reads
+(`ApiTokenLoader`): `/etc/oracle-ops/api.credentials` (`api.token=`, read key, GET APIs) and
+`/etc/oracle-ops/api-control.credentials` (`api.control.token=`, control key, start/stop). This replaces the 0.1.0
+rule "the installer never writes `/etc/oracle-ops`" for these two files only; every other credential file is still
+written only by Oracle OPS's tools.
+
+- **Generation:** 32 bytes from `/dev/urandom` via `od` into a command substitution (a pipe), checked to be exactly 64
+  lower-case hex characters; the two keys are compared and regenerated if equal (Oracle OPS refuses identical keys when
+  start/stop is enabled). If the random source fails, the run stops before any key file exists.
+- **In memory:** a local, non-exported shell variable, cleared after use. While a key is held it is also listed in
+  `API_KEY_REDACT_1/2`, which `sanitize_stream` removes from every logged line. Never an argument of an external
+  command, never in the environment.
+- **Writing:** `mktemp` inside `/etc/oracle-ops` (0600), the `printf` builtin writes `property=value`, then `chown
+  root:<group>` and `chmod 0640` **before** the file gets its name. A new file is linked into place with `ln` (never
+  replaces anything); Reconfigure replaces an existing regular file with an atomic `mv -T`. A symbolic link or a
+  non-regular file is never written through. After writing, owner, group, mode 0640 and link count 1 are verified.
+  `/etc/oracle-ops` is created root:`<group>` 0750 only if missing; an existing one is used as it is (it must be a real
+  directory owned by root).
+- **Existing files:** Fresh Installation keeps an existing valid key file unchanged and refuses, at the review screen
+  (before any change), a key file that is a link, not regular, has several hard links, or is not exactly one valid
+  property line.
+- **Display:** at the end of a successful Fresh Installation (no typed word; the screen is cleared on Enter), and in
+  menu 7 View API Keys, root only, after the operator types `SHOW`. The key is read strictly (same rules
+  as above; a link is refused, so the menu cannot be used to print another file) and printed with the `printf` builtin
+  to the terminal only, never to the log (the log records "displayed, value not logged"). The screen and, where
+  supported, its scroll-back are cleared afterwards. **Residual risk:** anyone who can see the screen, a terminal
+  recorder (`script`, tmux/screen logging) or the terminal emulator's own scroll-back can capture it.
+- **No backups of keys:** a replaced key is not kept anywhere. View APIs and View Configuration never show a key.
+- **Tests:** every test that creates or shows keys asserts that no key value appears in any log, staging area, trace or
+  installation file, and (except View API Keys) not on the terminal.
+
+## The OPS_OWNER password and the database step (0.3.0)
+
+- **What it is for:** creating the Oracle OPS tables and packages in the DBA-prepared `OPS_OWNER` schema. The installer
+  never uses a DBA or SYSDBA account, never creates or drops users or tablespaces, and never drops database objects.
+- **Input:** `read -s`, printable characters only, typed once per run. It is kept in one non-exported shell variable,
+  given to the database tool only on its **standard input** (the `printf` builtin in a pipeline), and cleared right after
+  the tool has run, on every path (success, refusal, error). It is listed in the log sanitiser while it exists. It is
+  never an argument, never in the environment, never written to a file, never shown.
+- **The tool** (`lib/db-tool.sh`, verified like every library) runs as root from the run's root-only directory with the
+  release's private JDK (root-owned) and JDBC driver (SHA-256 checked against the release's pin), with `ulimit -c 0` (no
+  core dump), a scrubbed environment and a time limit. In Java the password is read into a `char[]`, passed to the
+  driver (which needs a `String`), and the array is cleared; the JVM exits right after the step.
+- **What it runs:** only the files listed in `OPS_DB_SCRIPTS` (each SHA-256 checked against the value in the entry script)
+  and the fixed grant `GRANT EXECUTE ON OPS_OWNER.OPS_RUN_API TO OPS_RUNTIME`. Every file is parsed before the login; an
+  unsupported SQL*Plus command (`connect`, `host`, `define`, ...) stops the run. It refuses to create anything unless the
+  schema is empty, and checks afterwards that all six objects are VALID and both grants exist.
+- **Lockout:** a wrong password gets one retry only; ORA-28000/28001 stop the run (the DBA unlocks or resets the account).
+- **Privileges the DBA SQL grants beyond the object privileges:** `SELECT` on ten `DBA_*` views, because the Oracle OPS
+  scripts check the dictionary with them. That is read access to the whole dictionary for those views; the DBA may revoke
+  it after the installation (a later upgrade needs it again).
+- **The DBA SQL** contains no password (SQL*Plus `ACCEPT ... HIDE`, `set verify off`), is written 0644 to a path the
+  operator confirms (never through a link), and refuses to run in `CDB$ROOT` or when the users already exist.
+
+## Unprotected installer path (0.3.0)
+
+Run as root from a directory another account can change, the installer warns, asks for `yes`, copies the entry script and
+the listed libraries into a new root-only directory and runs the copy (which verifies the whole path and every digest).
+This removes the risk of a change **during** the run. It does not remove the risk that the owner of the clone changed the
+files **before**: the entry script that makes the copy is already running as root. Compare the entry script's SHA-256
+with the published value, or install into a root-owned path. Without a terminal the installer refuses.
+
+## Network listener over plain HTTP (0.3.0, operator decision 2026-11-11)
+
+When the bind address is not loopback, the API keys and the responses cross the network **unencrypted** until HTTPS is
+added. The installer restricts callers to the APEX/ORDS addresses entered (Oracle OPS's `api.plain-http.client-addresses`,
+answered 403 before authentication). A source address can be forged on the network path; use a firewall as well.
+
 ## Known limitations and residual risks
 
 - **Code from the pinned commit runs as root.** Oracle OPS's installation builds the service as root. The protection
@@ -205,6 +276,10 @@ libraries): a list of the SHA-256 of exactly six files at the pinned commit (`OP
 - **Interactive tools' output** (setup assistant, credential manager) is shown on the terminal. By Oracle OPS's design
   those tools never print a password. The installer also sanitizes the copy it logs.
 - **No rollback action:** rolling back an upgrade uses Oracle OPS's `activate-release.sh` (README, "Rolling back").
+- **API keys on screen:** Fresh Installation (at the end) and View API Keys print the keys in clear text by design (an
+  operator decision of 2026-11-11, for entering them into APEX). See "REST API keys".
+- **Plain HTTP:** Oracle OPS's API is plain HTTP; on a network listener keys and data are readable on the network path.
+  HTTPS is a deferred Oracle OPS decision.
 
 ## Reporting a vulnerability
 

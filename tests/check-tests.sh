@@ -621,7 +621,7 @@ show -p ActiveState -p SubState -p MainPID -p ActiveEnterTimestamp oracle-ops.se
 test_menu_offers_status_validate_and_exit() {
   input "$MENU_EXIT"
   run_installer
-  assert_rc 0; assert_out "5) Status"; assert_out "6) Validate"; assert_out "7) Exit"; assert_out "Choose an option [1-7]"
+  assert_rc 0; assert_out "5) View Installation Status"; assert_out "4) Validate Environment"; assert_out "10) Exit"; assert_out "Choose an option [1-10]"
   assert_absent "$SB/systemctl-trace"; assert_clean
 }
 
@@ -647,23 +647,23 @@ test_menu_status_without_installation_is_exit_6() {
 
 test_menu_validate() {
   healthy_install
-  input 6 "$FIXTURE"
+  input 4 "$FIXTURE"
   run_installer
   assert_rc 0; assert_out "validate: OK 19, WARN 0, FAIL 0"; assert_items OK $CHECK_NAMES source-repository source-commit source-archive source-verify config-validate service-identity
   assert_validate_trace; assert_git_only_archive_and_revparse; assert_clean
   # the default path, and a path given with a trailing slash
   EXTRA="DEFAULT_SOURCE_REPO=$FIXTURE"
-  input 6 ""
+  input 4 ""
   run_installer; assert_rc 0
-  input 6 "$FIXTURE/"
+  input 4 "$FIXTURE/"
   run_installer; assert_rc 0
   # three unusable answers
   EXTRA=""
-  input 6 relative /etc "x y"
+  input 4 relative /etc "x y"
   run_installer; assert_rc 2; assert_out "Not usable"
   assert_clean
   # a repository that does not hold the pin
-  input 6 "$SB/nowhere"
+  input 4 "$SB/nowhere"
   rm -f "$SB/roothome/trace"
   run_installer; assert_rc 4; assert_out "validation failed"; assert_no_trace; assert_clean
 }
@@ -785,7 +785,7 @@ test_boundary_menu_status() {
 }
 
 test_boundary_menu_validate() {
-  boundary_menu "menu validate" 6 "$FIXTURE"
+  boundary_menu "menu validate" 4 "$FIXTURE"
   assert_rc 0; assert_validate_trace; assert_git_only_archive_and_revparse
 }
 
@@ -804,16 +804,21 @@ test_static_guard_of_the_read_only_code() {
 }
 
 test_master_never_invokes_opsdbcheck_java_or_sqlplus() {
+  # 0.3.0: the installer runs ONE Java program on purpose - its own database tool (lib/db-tool.sh), on the release's private
+  # JDK, through the db_tool_exec seam only. Nothing else may start java, SQL*Plus, OpsDbCheck or a network tool.
   local dir f c
   dir="$(dirname "$INSTALLER")"
   for f in "$dir/oracle-ops-installer.sh" "$dir"/lib/*.sh; do
-    if grep -n -E 'OpsDbCheck|sqlplus|ojdbc' "$f" | grep -v -E '^[0-9]+:[[:space:]]*#'; then fail "$f refers to OpsDbCheck, sqlplus or a JDBC driver in code"; fi
+    if grep -n -E 'OpsDbCheck' "$f" | grep -v -E '^[0-9]+:[[:space:]]*#'; then fail "$f refers to OpsDbCheck in code"; fi
     for c in $(python3 -I "$REPO_ROOT/tests/guard-scan.py" commands "$f" | awk '{print $3}' | sort -u); do
-      case "$c" in java|sqlplus|sql|OpsDbCheck|ojdbc*|curl|wget|nc|ssh|scp|rsync|journalctl|logrotate) fail "$f invokes $c" ;; esac
+      case "$c" in java|sqlplus|sql|sqlcl|OpsDbCheck|ojdbc*|curl|wget|nc|ssh|scp|rsync|journalctl|logrotate) fail "$f invokes $c" ;; esac
     done
   done
-  # the only place the word java appears as a command argument is the Oracle OPS runtime path, never as a command
-  ! grep -rn -E '(^|[;&|(]|\$\()[[:space:]]*(/[A-Za-z0-9_./-]*/)?java([[:space:]]|$)' "$dir"/lib/*.sh "$dir/oracle-ops-installer.sh" | grep -v -E ':[0-9]+:[[:space:]]*#' | grep -v -E 'say |printf|echo' \
+  # the only place a JDBC driver is put on a class path, and the only Java program started
+  [ "$(grep -l -E -- '-cp ojdbc8\.jar' "$dir"/lib/*.sh "$dir/oracle-ops-installer.sh" | tr '\n' ' ')" = "$dir/lib/env.sh " ] \
+    || fail "a JDBC class path appears outside db_tool_exec"
+  grep -q -- '-cp ojdbc8.jar "$DB_TOOL_CLASS.java"' "$dir/lib/env.sh" || fail "db_tool_exec does not run the installer's own tool"
+  ! grep -rn -E '(^|[;&|(]|\$\()[[:space:]]*(/[A-Za-z0-9_./-]*/)?java([[:space:]]|$)' "$dir"/lib/*.sh "$dir/oracle-ops-installer.sh" | grep -v -E ':[0-9]+:[[:space:]]*#' | grep -v -E 'say |printf|echo|^[^:]*db-tool\.sh:' \
     || fail "a library invokes java"
 }
 

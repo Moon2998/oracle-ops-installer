@@ -13,10 +13,11 @@ tool_package() {
     git|curl|unzip|tar|gzip|sed|grep) echo "$1" ;;
     flock|setpriv) echo util-linux ;;
     find) echo findutils ;;
+    ip) echo iproute ;;
     awk) echo gawk ;;
     cmp) echo diffutils ;;
     getent) echo glibc-common ;;
-    sha256sum|readlink|stat|mktemp|timeout|df|install|cp|chmod|chown|chgrp|mkdir|rm|mv|ln|tee|env|tr|cut|sort|head|tail|date|id|uname|stty) echo coreutils ;;
+    sha256sum|readlink|stat|mktemp|timeout|df|install|cp|chmod|chown|chgrp|mkdir|rm|mv|ln|tee|env|tr|cut|sort|head|tail|date|id|uname|stty|od|sleep) echo coreutils ;;
     *) echo "" ;;
   esac
 }
