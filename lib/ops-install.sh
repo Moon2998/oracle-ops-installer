@@ -109,7 +109,7 @@ ask_db_target() {
 ask_api_listener() {
   local b p c a attempt ok others
   others="$(local_addresses | grep -v -E '^(127\.|::1$)' | tr '\n' ' ')"
-  say "      The REST API (GET and POST) is installed and enabled, over plain HTTP (HTTPS comes later)."
+  say "      The REST API (GET and POST) is installed and enabled, over plain HTTP (switch on HTTPS afterwards: docs/14)."
   say "      Bind address: 127.0.0.1 when Oracle APEX/ORDS runs on this host; otherwise this host's address that the"
   say "      APEX/ORDS server reaches${others:+ (this host has: $others)}."
   for attempt in 1 2 3; do
@@ -125,7 +125,7 @@ ask_api_listener() {
   if ! valid_loopback "$API_BIND"; then
     say "      Only the APEX/ORDS server(s) you name here may call the API (Oracle OPS refuses every other caller)."
     say "      Every API is served to these servers, start/stop too once ebs.control.enabled is true (plain HTTP: the keys"
-    say "      and data cross the network unencrypted until HTTPS is added; limit the port to them in the firewall)."
+    say "      and data cross the network unencrypted until HTTPS is on; limit the port to them in the firewall)."
     for attempt in 1 2 3; do
       printf '      IP address(es) of the APEX/ORDS server, comma-separated (at most %s): ' "$API_CLIENTS_MAX"
       read_line c || { echo; finish 5 "no client address was entered"; }

@@ -14,9 +14,9 @@ Oracle OPS's own scripts to do the work, and then removes the download again.
 ## What it does
 
 ```
-Oracle OPS Installer 0.3.1
+Oracle OPS Installer 0.3.2
 ========================
-Oracle OPS release 0.1.10 (commit 3299d8e). Oracle APEX is not installed or configured by this installer.
+Oracle OPS release 0.1.11 (commit d5b7ea6). Oracle APEX is not installed or configured by this installer.
 Installed: none found on this host
 
    1) Fresh Installation
@@ -99,9 +99,11 @@ or both on one host.
 - **APEX/ORDS on the database server:** enter this host's IP and the APEX/ORDS server's IP. The installer sets
   `api.bind-address` and `api.plain-http.client-addresses` (backup first, validated by Oracle OPS's `config-migrate.sh`,
   restarted and checked; restored if Oracle OPS refuses it). Plain HTTP: keys and data cross the network unencrypted
-  until HTTPS is added. Since Oracle OPS 0.1.10 (decision A7) the allowed APEX/ORDS server gets **every** API: Managed
+  until HTTPS is switched on. Since Oracle OPS 0.1.10 (decision A7) the allowed APEX/ORDS server gets **every** API: Managed
   Servers, host monitoring, node identity and, once `ebs.control.enabled` is true, start/stop. Limit the API port to that
-  server in the firewall, and rotate both keys when HTTPS is enabled.
+  server in the firewall. Since Oracle OPS 0.1.11 the API can be switched to **HTTPS** after installation
+  (`api.tls.enabled`; certificate, password file and the DB wallet steps: Oracle OPS `docs/14-Oracle-OPS-HTTPS.md`).
+  Regenerate both API keys once HTTPS is on.
 - Start/stop (POST) stays off (`ebs.control.enabled: false`).
 
 **Keys at the end:** after every check passed, both keys are printed with their APEX Web Credential settings (`Valid for
@@ -227,12 +229,12 @@ network connection each stop the run with a specific reason. Nothing is installe
 
 ## Which Oracle OPS release is installed
 
-The installer is pinned to **one** Oracle OPS release: commit `3299d8e33116c2d9b0387285e47f4fb6067cf52c`, version
-`0.1.10`. It never installs whatever happens to be the newest code on a branch. After downloading, it checks out exactly
+The installer is pinned to **one** Oracle OPS release: commit `d5b7ea61eb8a0477e0a8c0e9a560ab87b31fd02e`, version
+`0.1.11`. It never installs whatever happens to be the newest code on a branch. After downloading, it checks out exactly
 that commit and checks that:
 
 - the checked-out tree is that commit with no differences;
-- `service/VERSION` is `0.1.10`;
+- `service/VERSION` is `0.1.11`;
 - the release supports this operating system.
 
 After installing, it checks that the deployed build carries that commit id. A new Oracle OPS release needs a new
@@ -342,7 +344,7 @@ When something fails, the installer prints a short reason and the log's path. Or
 | `… is not a valid key file` / `… is a symbolic link` (API key, at the review screen) | An existing `/etc/oracle-ops/api*.credentials` is not exactly one `api.token=` / `api.control.token=` line of at least 32 characters in a single regular file. Fix or remove it (it was not changed), then run again. |
 | `Port … is already in use` | Another program listens there. Choose another port. |
 | `[FAIL] REST API deployed` | The service did not log `API routes served: [...]` with `/api/v1/ops/status`. Check `<dir>/logs/oracle-ops.log` and `/etc/oracle-ops/api.credentials`. |
-| `release 0.1.10 is already installed … built from different source` | The host runs a build with the same version number but different code. Oracle OPS cannot install a second build under one version, so a new Oracle OPS version (and installer release) is needed. |
+| `release 0.1.11 is already installed … built from different source` | The host runs a build with the same version number but different code. Oracle OPS cannot install a second build under one version, so a new Oracle OPS version (and installer release) is needed. |
 | `an upgrade needs both in place` | Upgrade needs the existing `config/application.yaml` and `/etc/oracle-ops/database.credentials`. |
 | `the Oracle OPS setup assistant did not complete` | Read the assistant's messages (shown on screen and in the log), fix the cause and run Fresh Installation again. An incomplete installation is detected and completed; the API key files already created are kept and reused. |
 | `did not report a healthy database connection` | The new release started but could not log in to the database. Check the database and `<dir>/logs/oracle-ops.log`. See "Rolling back". |
