@@ -124,8 +124,8 @@ ask_api_listener() {
   [ -n "$API_BIND" ] || finish 2 "no usable bind address after three attempts"
   if ! valid_loopback "$API_BIND"; then
     say "      Only the APEX/ORDS server(s) you name here may call the API (Oracle OPS refuses every other caller)."
-    say "      Note: with Oracle OPS $OPS_VERSION a caller on another host gets About and Status; the other APIs answer on"
-    say "      this host only until a later Oracle OPS release opens them."
+    say "      Every API is served to these servers, start/stop too once ebs.control.enabled is true (plain HTTP: the keys"
+    say "      and data cross the network unencrypted until HTTPS is added; limit the port to them in the firewall)."
     for attempt in 1 2 3; do
       printf '      IP address(es) of the APEX/ORDS server, comma-separated (at most %s): ' "$API_CLIENTS_MAX"
       read_line c || { echo; finish 5 "no client address was entered"; }
